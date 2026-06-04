@@ -1,0 +1,2 @@
+*.cmake linguist-generated=true
+CMakeLists.txt linguist-generated=true

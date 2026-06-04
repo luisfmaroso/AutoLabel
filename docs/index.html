@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>AutoLabel &mdash; Project Doc</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<main>
+
+<h1>AutoLabel</h1>
+<p class="subtitle">A lightweight image annotation tool for building YOLO segmentation datasets with Meta SAM2. Built to feel like a natural extension of <strong>InferenceVisualizer</strong> &mdash; same layout, architecture, and Qt patterns. Current phase: <strong>Phase 3 &mdash; Manual annotation</strong>.</p>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#overview">Project overview</a></li>
+    <li><a href="#phase">Current phase</a></li>
+    <li><a href="#tree">Folder structure</a></li>
+    <li><a href="#what">What was implemented</a></li>
+    <li><a href="#why">Why it was implemented this way</a></li>
+    <li><a href="#build">Build &amp; run instructions</a></li>
+    <li><a href="#roadmap">Roadmap</a></li>
+    <li><a href="#changelog">Changelog</a></li>
+  </ol>
+</nav>
+
+<h2 id="overview">1. Project overview</h2>
+<p>
+  <strong>AutoLabel</strong> is a desktop application for annotating images and exporting
+  <strong>YOLO segmentation</strong> datasets. The user opens an image folder, places positive and
+  negative prompt points, and a <strong>SAM2</strong> backend generates a mask; accepted masks become
+  polygons and are exported in normalized YOLO segmentation format.
+</p>
+<p>
+  The frontend is <strong>C++ / Qt Widgets / OpenCV</strong>. The backend is a long-lived
+  <strong>Python</strong> process (PyTorch + SAM2) that loads the model <em>once</em> and answers JSON
+  requests over stdin/stdout, driven from Qt via <code>QProcess</code>. The project doubles as a
+  structured learning path through modern C++, Qt, OpenCV, desktop app architecture, and C++/Python
+  interop &mdash; and is intentionally kept small and focused (not a CVAT / Label Studio replacement).
+</p>
+<p>
+  <strong>InferenceVisualizer</strong> is the primary UI and architecture reference;
+  <strong>SegmentAnythingAnnotator</strong> is the workflow / SAM-integration reference. Where the two
+  disagree, AutoLabel follows InferenceVisualizer so the two apps feel like one software family.
+</p>
+
+<h2 id="phase">2. Current phase <span class="badge">Phase 3 / 10</span></h2>
+<p><strong>Direction change (decided with the user).</strong> The original brief centred on SAM2 auto-masking
+   via positive/negative point prompts. We pivoted: the <strong>manual</strong> annotation tool becomes the
+   core (pure C++/Qt, no backend), and SAM2 is layered on later &mdash; eventually able to take a manually
+   drawn shape and auto-predict polygons on subsequent images. Both modes will coexist. "First make it all
+   work manually."</p>
+<p>Phase 3 (this increment) is the manual annotation canvas. <code>ImageView</code> becomes the drawing
+   surface: two modes &mdash; <strong>Rectangle</strong> (click two opposite corners &rarr; box, for detection)
+   and <strong>Polygon</strong> (click vertices, click near the first to close, for segmentation) &mdash; with
+   a live preview to the cursor. <strong>Esc</strong> aborts the in-progress shape, <strong>right-click</strong>
+   undoes the last polygon vertex, <strong>Delete</strong> removes the last committed shape. On completion the
+   shape is <em>pending</em>; <strong>Enter</strong> prompts for a class id and commits it. Committed shapes are
+   stored in a new <code>AnnotationModel</code> and written to a YOLO <code>.txt</code> next to the image
+   (detection format for rectangles, segmentation format for polygons, normalized); existing label files load
+   back when an image is revisited.</p>
+<p><strong>Zoom/pan removed</strong> at the user's request &mdash; the image simply fits the window, and the
+   canvas is dedicated to annotating. The Phase 2 <em>View</em> menu is gone.</p>
+<p><strong>Editing &amp; colours (this increment).</strong> Committed shapes can now be edited, mode-agnostically:
+   <strong>long-press a vertex</strong> to drag it, <strong>long-press an edge</strong> to insert a vertex and
+   drag it, and <strong>right-click a shape</strong> for a context menu (<em>Delete vertex</em> /
+   <em>Delete shape</em>). Hovering a vertex highlights it. Per-class <strong>colours</strong> arrived: each
+   committed shape is drawn in its class's colour, configurable in a new <em>Settings &rarr; Class Colours&hellip;</em>
+   dialog (a class-id&nbsp;&rarr;&nbsp;colour table backed by <code>QColorDialog</code>), with overrides persisted
+   via <code>QSettings</code>; classes without an explicit colour fall back to a fixed default palette.</p>
+<p><strong>OpenCV decision (unchanged).</strong> The C++ frontend does not link OpenCV. A workspace scan found
+   no C++ OpenCV installed (only the Python <code>cv2</code> package). OpenCV-shaped work (mask&rarr;polygon
+   extraction) will live in the Python SAM2 backend where <code>cv2</code> already exists; the frontend stays
+   on Qt for loading and display.</p>
+
+<h2 id="tree">3. Folder structure</h2>
+<div class="tree">AutoLabel/
+&#9500;&#9472;&#9472; CMakeLists.txt              <span class="cm"># root: project metadata, finds Qt, adds src/</span>
+&#9500;&#9472;&#9472; src/
+&#9474;   &#9500;&#9472;&#9472; CMakeLists.txt          <span class="cm"># declares the executable target + its sources</span>
+&#9474;   &#9500;&#9472;&#9472; main.cpp                <span class="cm"># entry point + qInstallMessageHandler (file logger)</span>
+&#9474;   &#9500;&#9472;&#9472; app/                    <span class="cm"># application glue: windows, controllers</span>
+&#9474;   &#9474;   &#9500;&#9472;&#9472; MainWindow.h
+&#9474;   &#9474;   &#9492;&#9472;&#9472; MainWindow.cpp
+&#9474;   &#9500;&#9472;&#9472; ui/                     <span class="cm"># reusable widgets</span>
+&#9474;   &#9474;   &#9500;&#9472;&#9472; ImageView.h         <span class="cm"># QGraphicsView annotation canvas (draw + edit)</span>
+&#9474;   &#9474;   &#9500;&#9472;&#9472; ImageView.cpp
+&#9474;   &#9474;   &#9500;&#9472;&#9472; SettingsDialog.h    <span class="cm"># class-id -> colour table (QColorDialog)</span>
+&#9474;   &#9474;   &#9492;&#9472;&#9472; SettingsDialog.cpp
+&#9474;   &#9492;&#9472;&#9472; annotation/             <span class="cm"># Phase 3: annotation data + YOLO I/O</span>
+&#9474;       &#9500;&#9472;&#9472; Shape.h             <span class="cm"># one shape (rectangle or polygon) in image pixels</span>
+&#9474;       &#9500;&#9472;&#9472; AnnotationModel.h   <span class="cm"># list of committed shapes + change signal</span>
+&#9474;       &#9500;&#9472;&#9472; AnnotationModel.cpp
+&#9474;       &#9500;&#9472;&#9472; ClassColors.h       <span class="cm"># class id -> colour (overrides + default palette)</span>
+&#9474;       &#9500;&#9472;&#9472; ClassColors.cpp
+&#9474;       &#9500;&#9472;&#9472; YoloIo.h            <span class="cm"># Shape list &lt;-&gt; YOLO .txt (normalized)</span>
+&#9474;       &#9492;&#9472;&#9472; YoloIo.cpp
+&#9500;&#9472;&#9472; docs/
+&#9474;   &#9500;&#9472;&#9472; index.html              <span class="cm"># this project doc</span>
+&#9474;   &#9492;&#9472;&#9472; style.css               <span class="cm"># shared stylesheet (same as InferenceVisualizer)</span>
+&#9500;&#9472;&#9472; .vscode/
+&#9474;   &#9492;&#9472;&#9472; launch.json             <span class="cm"># VS Code debug profile (MinGW / GDB)</span>
+&#9492;&#9472;&#9472; build/                      <span class="cm"># CMake build tree (regenerable, gitignored)</span></div>
+
+<p>Further subdirectories arrive as the phases need them: <code>src/backend/</code> (the
+   <code>QProcess</code> SAM2 client) and a top-level <code>python/</code> service when SAM2 is layered on
+   after the manual tool is complete.</p>
+
+<h2 id="what">4. What was implemented</h2>
+
+<h3>Phase 1</h3>
+<ul>
+  <li>Two-tier CMake setup (root + <code>src/</code>) with Qt auto-detection that globs the newest
+      <code>C:\Qt\6.*</code> install &mdash; identical to InferenceVisualizer so both projects configure
+      the same way.</li>
+  <li>A top-level <code>QMainWindow</code> (<code>src/app/MainWindow</code>) with a title, status bar, a
+      <strong>File</strong> menu (<em>Open Image Folder&hellip;</em> [Ctrl+O, stub] and <em>Exit</em>
+      [Ctrl+Q]), and a <strong>Help</strong> menu (<em>About</em>).</li>
+  <li>A placeholder central widget (a centered <code>QLabel</code>) built in
+      <code>buildCentralWidget()</code> &mdash; isolated behind one method so Phase 2 can swap in the
+      image viewer with a small, local change.</li>
+  <li>Hand-coded UI (no <code>.ui</code> Designer files) so every action, shortcut, and
+      <code>connect()</code> is visible and grep-able.</li>
+  <li>A file-based <code>qInstallMessageHandler</code> in <code>main.cpp</code> mirroring all
+      <code>qDebug</code>/<code>qWarning</code>/<code>qCritical</code> output to <code>autolabel.log</code>
+      next to the .exe &mdash; essential on Windows where Qt GUI apps route output through
+      <code>OutputDebugString</code>.</li>
+  <li>Warnings-as-feedback compile flags (<code>/W4 /permissive-</code> on MSVC,
+      <code>-Wall -Wextra -Wpedantic</code> otherwise) and a <code>.vscode/launch.json</code> debug profile.</li>
+</ul>
+
+<h3>Phase 2</h3>
+<ul>
+  <li>New <code>ImageView</code> widget (<code>src/ui/ImageView.{h,cpp}</code>) built on
+      <code>QGraphicsView</code> + <code>QGraphicsScene</code> + <code>QGraphicsPixmapItem</code>. Public API
+      mirrors IV's <code>ImageView</code> (<code>setImage</code> / <code>clear</code> / <code>hasImage</code>).</li>
+  <li>Mouse-wheel <strong>zoom</strong> anchored under the cursor (<code>AnchorUnderMouse</code>), clamped to
+      a sane scale range; click-drag <strong>pan</strong> via <code>ScrollHandDrag</code>; fit-to-window via
+      <code>fitInView</code>. An <code>m_autoFit</code> flag keeps the image fitted on window resize until the
+      user zooms manually, then honours their zoom level.</li>
+  <li>Empty-state hint ("No image loaded&hellip;") drawn directly on the viewport in <code>paintEvent</code>.</li>
+  <li><code>MainWindow</code>: <em>Open Image Folder&hellip;</em> now scans the chosen directory
+      (<code>QDir::entryInfoList</code> over a fixed extension set, sorted by name), loads the first image, and
+      reports the count. <em>Previous</em>/<em>Next</em> navigation (&larr;/&rarr;) under a new <em>Image</em>
+      menu; <em>Zoom In/Out</em> (Ctrl+/-) and <em>Fit to Window</em> (Ctrl+0) under a new <em>View</em> menu.
+      Navigation/zoom actions enable/disable based on state.</li>
+  <li>Images load via <code>QImageReader</code> with <code>setAutoTransform(true)</code> (EXIF orientation),
+      per-file error reporting via <code>QMessageBox</code>. Status bar shows
+      <code>name&nbsp;[i/n]&nbsp;W&times;H</code>; window title shows the current file name.</li>
+</ul>
+
+<h3>Phase 3 (manual annotation)</h3>
+<ul>
+  <li><strong>Direction change:</strong> manual annotation is now the core; SAM2 is deferred and will be layered
+      on later. Both modes will coexist.</li>
+  <li>New <code>annotation/</code> module: <code>Shape</code> (a rectangle [2 corner points] or polygon
+      [&ge;3 vertices], in image pixels, plus a class id), <code>AnnotationModel</code> (the list of committed
+      shapes for the current image + a <code>changed()</code> signal; pure data, no rendering/file knowledge),
+      and <code>YoloIo</code> (free functions converting a shape list to/from a normalized YOLO <code>.txt</code>).</li>
+  <li><code>ImageView</code> became the drawing canvas: <strong>Rectangle</strong> mode (two-click box) and
+      <strong>Polygon</strong> mode (multi-click; click within ~12&nbsp;px of the first vertex to close), each
+      with a live cyan preview edge to the cursor. Drawing happens in <code>drawForeground()</code>, whose
+      painter is already in scene&nbsp;==&nbsp;image-pixel coordinates; pens are cosmetic and vertex markers are
+      sized as <code>radius / scale</code> so they stay constant on screen.</li>
+  <li>Interaction: <strong>Esc</strong> aborts the in-progress shape; <strong>right-click</strong> undoes the
+      last polygon vertex; a completed shape is <em>pending</em> (drawn amber) until <strong>Enter</strong>,
+      which prompts for a class id (<code>QInputDialog</code>, remembering the last value) and commits it;
+      <strong>Delete</strong> removes the last committed shape.</li>
+  <li><code>MainWindow</code> owns the model and is the only place that touches label files: on commit/remove it
+      (re)writes <code>&lt;image&gt;.txt</code> next to the image; on opening an image it loads any existing
+      <code>.txt</code> back so prior work is shown and editable. New <em>Annotate</em> menu toggles mode
+      (R / P); the <em>View</em> menu and all zoom/pan were removed.</li>
+</ul>
+
+<h3>Phase 3 (editing + class colours)</h3>
+<ul>
+  <li><strong>Vertex editing</strong> of committed shapes, mode-agnostic and gesture-based: <strong>long-press a
+      vertex</strong> (~350&nbsp;ms hold) starts a drag; <strong>long-press an edge</strong> inserts a vertex at
+      that point and drags it; moving more than a few px before the hold completes cancels the gesture so quick
+      clicks still draw. A <code>QTimer</code> drives the hold; the dragged shape is edited on a working copy and
+      written back to the model on release.</li>
+  <li><strong>Deletion</strong>: <strong>right-click</strong> a committed shape opens a context menu
+      (<em>Delete vertex</em> &mdash; polygons with &gt;3 points only &mdash; / <em>Delete shape</em>); the
+      existing <strong>Delete</strong> key still removes the last committed shape. Hovering a vertex highlights it
+      with a white ring and an open-hand cursor.</li>
+  <li><code>AnnotationModel</code> gained <code>updateShape(i, &hellip;)</code> and <code>removeAt(i)</code>; the
+      canvas emits a new <code>annotationsChanged()</code> after any committed-shape edit, which MainWindow
+      connects to <code>saveAnnotations()</code> so the <code>.txt</code> stays in sync.</li>
+  <li><strong>Per-class colours</strong>: new <code>ClassColors</code> (class id &rarr; colour; user overrides on
+      top of a fixed default palette) and <code>SettingsDialog</code> (<em>Settings &rarr; Class Colours&hellip;</em>,
+      Ctrl+,) &mdash; a class-id/colour table editable via <code>QColorDialog</code>, mirroring IV's swatch +
+      <code>QDialogButtonBox</code> approach. Overrides persist via <code>QSettings</code>; committed shapes render
+      in their class colour.</li>
+</ul>
+
+<h2 id="why">5. Why it was implemented this way</h2>
+
+<h3>5.5 QGraphicsView for the image canvas, not a scaled QLabel</h3>
+<p>InferenceVisualizer's <code>ImageView</code> is a <code>QLabel</code> that rescales a pixmap to fit &mdash;
+   perfect when you only ever "show the whole frame". AutoLabel needs more: Phase 2 requires real
+   <strong>zoom + pan</strong>, and Phase 3 needs to convert a mouse click into an exact <em>image-pixel</em>
+   coordinate for SAM2 prompts. <code>QGraphicsView</code> gives pan (<code>ScrollHandDrag</code>) and zoom (a
+   <code>scale()</code> transform) almost for free, and because the pixmap item sits at the scene origin,
+   <code>mapToScene(pos)</code> returns image pixel coordinates directly &mdash; exactly what Phase 3 wants.
+   So the divergence from IV buys precisely the two capabilities this project needs.</p>
+<pre><code><span class="c">// src/ui/ImageView.cpp &mdash; scene rect == image bounds, so scene coords == pixel coords</span>
+void ImageView::setImage(const QImage &amp;image)
+{
+    resetInteraction();
+    if (image.isNull()) { clear(); return; }
+    m_pixmapItem-&gt;setPixmap(QPixmap::fromImage(image));
+    m_scene-&gt;setSceneRect(m_pixmapItem-&gt;boundingRect());
+    fitImage();
+}</code></pre>
+
+<h3>5.6 Zoom/pan removed &mdash; the canvas just fits the window</h3>
+<p>Phase 2 shipped mouse-wheel zoom and click-drag pan. The user asked to drop both: for this workflow the image
+   should simply fill the window and the mouse is reserved for drawing. So <code>ImageView</code> sets
+   <code>NoDrag</code> (left-click annotates, not pans), ignores the wheel, and re-fits the image on every
+   resize. <code>mapToScene()</code> still yields exact image-pixel coordinates regardless of the fit scale, so
+   annotation precision is unaffected. The <em>View</em> menu is gone.</p>
+
+<h3>5.7 No C++ OpenCV &mdash; OpenCV work goes to the Python backend</h3>
+<p>The original plan listed OpenCV as a frontend dependency. A workspace scan found no C++ OpenCV installed
+   (only Python <code>cv2</code>), and on reflection the frontend doesn't need it: loading and display are a
+   solved problem in Qt, and the only genuinely OpenCV-shaped task &mdash; turning an accepted mask into a
+   simplified polygon (Phase 8) &mdash; naturally belongs in the Python SAM2 backend, which already imports
+   <code>cv2</code>. Keeping OpenCV out of the C++ build removes a heavy native dependency and a Windows DLL
+   deployment step for zero loss of capability.</p>
+
+<h3>5.8 Separation: canvas draws, model stores, MainWindow exports</h3>
+<p>Three responsibilities are kept in three places. <code>AnnotationModel</code> is pure data (a shape list +
+   a <code>changed()</code> signal) and knows nothing about pixels-on-screen or files. <code>ImageView</code>
+   renders that model and owns only the <em>transient</em> interaction state (the shape being drawn, the one
+   awaiting a class) &mdash; it never touches the filesystem and doesn't know what a "class" dialog looks like.
+   When a shape is finished, the canvas emits <code>shapeDrawn(Shape)</code>; <code>MainWindow</code> is the only
+   component that asks for a class, mutates the model, and writes the YOLO file. This is IV's "widget emits
+   intent, app dispatches" pattern, so the file format, the class-entry UI, and the drawing logic can each
+   change without disturbing the others.</p>
+<pre><code><span class="c">// src/ui/ImageView.cpp &mdash; canvas finishes a shape, emits intent, forgets it</span>
+case Qt::Key_Return:
+case Qt::Key_Enter:
+    if (m_pending &amp;&amp; m_pendingShape.isComplete()) {
+        const ::Shape shape = m_pendingShape;
+        resetInteraction();
+        viewport()-&gt;update();
+        emit shapeDrawn(shape);   <span class="c">// MainWindow assigns class + exports</span>
+    }
+    return;</code></pre>
+
+<h3>5.9 "Pending then Enter": a finished shape isn't committed until labelled</h3>
+<p>Completing a rectangle or closing a polygon does <em>not</em> immediately add it to the model. The shape
+   enters a <em>pending</em> state (drawn amber), and only <strong>Enter</strong> &rarr; class dialog commits it;
+   <strong>Esc</strong> discards it. This matches how the user described the flow ("when done, press Enter, type
+   the class"), gives a clear chance to abort a misclick, and keeps every committed shape guaranteed to carry a
+   class id &mdash; so export never has to deal with unlabelled geometry.</p>
+
+<h3>5.10 Our <code>Shape</code> vs <code>QFrame::Shape</code></h3>
+<p>A subtle C++ gotcha worth recording: <code>ImageView</code> derives from <code>QGraphicsView</code> &rarr;
+   <code>QFrame</code>, and <code>QFrame</code> has its own <code>Shape</code> enum. Inside the class the
+   unqualified name <code>Shape</code> therefore resolves to <code>QFrame::Shape</code>, not our annotation
+   struct &mdash; which first surfaced as a baffling <code>connect()</code> failure (the signal's parameter had
+   silently become <code>QFrame::Shape</code>). The fix is to write <code>::Shape</code> (the global one) inside
+   this class; the rest of the codebase, which doesn't inherit <code>QFrame</code>, keeps the clean
+   <code>Shape</code> name.</p>
+
+<h3>5.11 Long-press to edit, so drawing and editing share one canvas without a mode switch</h3>
+<p>The user asked specifically for a <em>long-press</em> to grab a vertex. That gesture neatly resolves the core
+   ambiguity of a single canvas that both draws and edits: a quick click on empty space (or a quick click while
+   mid-polygon) means "draw"; a deliberate hold on an existing vertex/edge means "edit". So there's no separate
+   "edit mode" to toggle &mdash; editing is always available, but only triggers on an intentional hold, which
+   can't be confused with placing a point. Implementation: a press over a committed feature starts a single-shot
+   <code>QTimer</code>; if it fires before the button is released or the cursor wanders, the drag begins;
+   otherwise the press is discarded as a tap. The drag mutates a working copy and only writes back to the model
+   on release, so a half-finished drag never corrupts stored geometry.</p>
+
+<h3>5.12 Class colours: overrides over a default palette, persisted with QSettings</h3>
+<p>Class ids are open-ended (0, 1, 2&hellip;), so a fixed "class 0 / class 1" colour pair like IV's wouldn't
+   scale. Instead <code>ClassColors</code> always answers <code>colorFor(id)</code>: an explicit user override if
+   one exists, else a deterministic pick from a 12-colour palette (<code>id % 12</code>). The user only adds
+   rows in the Settings dialog for classes whose colour they want to pin; everything else is auto-coloured and
+   still distinct. Overrides persist via <code>QSettings</code> (org/app already set in <code>main.cpp</code>),
+   exactly like IV persists its inference settings.</p>
+
+<h3>5.1 Mirror InferenceVisualizer's two-tier CMake and <code>src/</code> layout</h3>
+<p>The root <code>CMakeLists.txt</code> answers <em>"what is this project, and where is Qt?"</em>; the
+   inner <code>src/CMakeLists.txt</code> answers <em>"what files compile into the binary?"</em>. Adopting
+   IV's exact structure (and the <code>app/</code> &middot; <code>ui/</code> split it grows into) means
+   patterns, naming, and build behavior carry straight over &mdash; the whole point of the two apps being
+   one family.</p>
+
+<h3>5.2 OpenCV found but not linked yet</h3>
+<p>The architecture calls for OpenCV, but Phase 1 has nothing that uses it. Requiring it now would block a
+   clean build for no benefit. IV added dependencies exactly when a step first needed them (Multimedia in
+   step 2, ONNX Runtime in step 3); AutoLabel does the same &mdash; the <code>find_package(OpenCV)</code>
+   line sits commented in the root CMake, ready for Phase 2.</p>
+
+<h3>5.3 Placeholder central widget behind <code>buildCentralWidget()</code></h3>
+<p>Phase 1 has no image to show, so the central widget is a single centered <code>QLabel</code>. Isolating
+   it in one method mirrors how IV's single pane became a <code>QSplitter</code> in one localized edit:
+   Phase 2 replaces the body of <code>buildCentralWidget()</code> with the image viewer, and nothing else
+   in <code>MainWindow</code> has to move.</p>
+
+<h3>5.4 The Open-Folder action exists now as a stub</h3>
+<p>Wiring the menu entry and its slot in Phase 1 settles the menu structure early; Phase 2 only fills in the
+   body. The stub reports honestly via the status bar rather than pretending to work.</p>
+
+<h2 id="build">6. Build &amp; run instructions</h2>
+
+<h3>6.1 Windows command line (MinGW + Ninja)</h3>
+<pre><code>$env:PATH = "C:\Qt\Tools\mingw1310_64\bin;C:\Qt\Tools\Ninja;C:\Qt\Tools\CMake_64\bin;$env:PATH"
+
+cmake -S C:\Projects\AutoLabel `
+      -B C:\Projects\AutoLabel\build `
+      -G Ninja `
+      -DCMAKE_BUILD_TYPE=Debug
+
+cmake --build C:\Projects\AutoLabel\build
+
+C:\Projects\AutoLabel\build\bin\AutoLabel.exe</code></pre>
+<p>CMake auto-detects the newest Qt 6.x under <code>C:\Qt</code>. Override with
+   <code>-DCMAKE_PREFIX_PATH=C:\Qt\6.11.1\mingw_64</code> if the glob picks the wrong one.</p>
+
+<h3>6.2 Qt Creator</h3>
+<ol>
+  <li>Open <code>File &rarr; Open File or Project&hellip;</code> and pick
+      <code>C:\Projects\AutoLabel\CMakeLists.txt</code>.</li>
+  <li>Select the MinGW 64-bit kit, click <em>Configure Project</em>.</li>
+  <li>Build (<kbd>Ctrl</kbd>+<kbd>B</kbd>), run (<kbd>Ctrl</kbd>+<kbd>R</kbd>).</li>
+</ol>
+
+<h3>6.3 VS Code</h3>
+<p>The repo ships <code>.vscode/launch.json</code> (MinGW GDB on Windows, system GDB on Linux). With the
+   <strong>CMake Tools</strong> and <strong>C/C++</strong> extensions installed, pick the kit, then press
+   <kbd>F5</kbd> &mdash; the <code>CMake: build</code> preLaunchTask runs first.</p>
+
+<h2 id="roadmap">7. Roadmap</h2>
+<ol>
+  <li><strong>Phase 1 &mdash; Project skeleton.</strong> CMake, MainWindow, menus, status bar, placeholder.</li>
+  <li><strong>Phase 2 &mdash; Image viewer.</strong> Open folder, display/navigate images (Qt <code>QImageReader</code> &rarr; <code>QGraphicsView</code>). <em>(Zoom/pan since removed in Phase 3.)</em></li>
+  <li><strong>Phase 3 &mdash; Manual annotation.</strong> <em>(current)</em> Rectangle (2-click box) + Polygon (multi-click, close near first) drawing, shape model, abort/undo/delete, class entry on Enter, YOLO <code>.txt</code> export + load next to each image.</li>
+  <li><strong>Phase 3-edit &mdash; Vertex editing + class colours.</strong> <em>(done)</em> Long-press a vertex to drag it; long-press an edge to add a vertex; right-click to delete vertex/shape; per-class colours via a Settings dialog.</li>
+  <li><strong>Phase 4 &mdash; Python backend comms.</strong> Long-lived <code>QProcess</code>, JSON request/response (<code>ping</code> &rarr; <code>ok</code>).</li>
+  <li><strong>Phase 5 &mdash; SAM2 service.</strong> Load model once; image + points in, mask out.</li>
+  <li><strong>Phase 6 &mdash; Mask visualization.</strong> Overlay with adjustable transparency, auto-refresh.</li>
+  <li><strong>Phase 7 &mdash; SAM2-assisted workflow.</strong> Positive/negative prompt points; Generate / Accept / Clear; accepted mask &rarr; polygon (OpenCV contour extraction in the Python backend). Later: seed SAM2 from a manual shape and auto-predict on the next images.</li>
+</ol>
+<p class="subtitle">Roadmap reordered after the Phase 3 direction change: the manual tool (originally Phases 3, 8&ndash;10) is now the core and largely lands in Phase 3; SAM2 (originally Phases 4&ndash;7) is layered on afterward.</p>
+
+<h2 id="changelog">8. Changelog</h2>
+<ul>
+  <li><strong>2026-06-04 &mdash; Phase 3 (editing + class colours).</strong> Committed shapes are now editable.
+      Mode-agnostic, gesture-based: <strong>long-press a vertex</strong> drags it; <strong>long-press an edge</strong>
+      inserts a vertex and drags it (a single-shot <code>QTimer</code> drives the hold; movement before it fires
+      cancels so quick clicks still draw); <strong>right-click</strong> a shape &rarr; context menu
+      (<em>Delete vertex</em> for polygons with &gt;3 points / <em>Delete shape</em>); hover highlights a vertex.
+      Drags edit a working copy and write back on release. <code>AnnotationModel</code> gained
+      <code>updateShape</code>/<code>removeAt</code>; the canvas emits <code>annotationsChanged()</code> &rarr;
+      MainWindow re-exports. Added per-class colours: new <code>annotation/ClassColors</code> (override map over a
+      fixed 12-colour default palette) and <code>ui/SettingsDialog</code> (<em>Settings &rarr; Class
+      Colours&hellip;</em>, Ctrl+,; class-id/colour table via <code>QColorDialog</code>, mirroring IV's swatch +
+      <code>QDialogButtonBox</code> pattern); overrides persist via <code>QSettings</code>; committed shapes render
+      in their class colour. Hit the <code>::Shape</code> vs <code>QFrame::Shape</code> clash again in the new
+      hit-testing/edit code (resolved with <code>::Shape</code>). Build clean; app launches.</li>
+  <li><strong>2026-06-04 &mdash; Phase 3 (manual annotation) + direction change.</strong> Decided with the user
+      to make manual annotation the core and defer SAM2 (both modes will coexist; SAM2 later able to seed from a
+      manual shape and auto-predict). New <code>src/annotation/</code> module: <code>Shape</code> (rectangle =
+      2 corner points / polygon = &ge;3 vertices, in image pixels, + class id), <code>AnnotationModel</code>
+      (committed-shape list + <code>changed()</code> signal), <code>YoloIo</code> (shape&nbsp;list &harr;
+      normalized YOLO <code>.txt</code>; detection line for rectangles, segmentation line for polygons; parses
+      both back). <code>ImageView</code> rebuilt as the drawing canvas: Rectangle (2-click) and Polygon
+      (multi-click, close within ~12&nbsp;px of vertex 0) modes with a live preview; <strong>Esc</strong> abort,
+      <strong>right-click</strong> undo last polygon point, <strong>Delete</strong> remove last committed shape,
+      completed shape is <em>pending</em> until <strong>Enter</strong> &rarr; class dialog commits it. Rendering in
+      <code>drawForeground()</code> (scene == pixel coords; cosmetic pens; markers sized <code>radius/scale</code>).
+      <code>MainWindow</code> owns the model, adds an <em>Annotate</em> menu (R / P), assigns classes, and is the
+      sole writer of label files: it (re)writes <code>&lt;image&gt;.txt</code> on every commit/remove and loads an
+      existing <code>.txt</code> when an image is opened. <strong>Removed</strong> all zoom/pan and the Phase 2
+      <em>View</em> menu (user request) &mdash; the image just fits the window. Hit a name clash between our
+      <code>Shape</code> and <code>QFrame::Shape</code> (resolved with <code>::Shape</code> inside
+      <code>ImageView</code>). Verified the YOLO round-trip (rectangle + polygon, write&rarr;read) with a
+      standalone test against Qt Core: all assertions pass.</li>
+  <li><strong>2026-06-04 &mdash; Phase 2.</strong> Image viewer. New <code>src/ui/ImageView</code>
+      (<code>QGraphicsView</code> + scene + pixmap item): mouse-wheel zoom anchored under the cursor (clamped),
+      click-drag pan (<code>ScrollHandDrag</code>), fit-to-window, and an <code>m_autoFit</code> flag that keeps
+      the image fitted on resize until the user zooms manually. Empty-state hint drawn in <code>paintEvent</code>.
+      <code>MainWindow</code>: real <em>Open Image Folder&hellip;</em> (scans a directory via
+      <code>QDir::entryInfoList</code> over a fixed extension set, sorted by name), <em>Previous</em>/<em>Next</em>
+      navigation (&larr;/&rarr;) in a new <em>Image</em> menu, and zoom/fit in a new <em>View</em> menu
+      (Ctrl+/-, Ctrl+0); nav/zoom actions enable/disable by state. Images load via <code>QImageReader</code> with
+      EXIF auto-transform and per-file error reporting; status bar shows <code>name [i/n] W&times;H</code>.
+      <strong>Decided against C++ OpenCV</strong>: none installed in the workspace (only Python <code>cv2</code>),
+      and the frontend doesn't need it &mdash; loading/display are handled by Qt, and contour&rarr;polygon work
+      (Phase 8) belongs in the Python backend. Root <code>CMakeLists.txt</code> documents this; no OpenCV link in
+      the C++ build.</li>
+  <li><strong>2026-06-04 &mdash; Phase 1.</strong> Initial project skeleton. Two-tier CMake with Qt
+      auto-detection (Qt-only; OpenCV <code>find_package</code> stubbed for Phase 2).
+      <code>src/app/MainWindow</code> with File menu (<em>Open Image Folder&hellip;</em> stub, <em>Exit</em>),
+      Help menu (<em>About</em>), status bar, and a placeholder central widget behind
+      <code>buildCentralWidget()</code>. File-based <code>qInstallMessageHandler</code> in
+      <code>main.cpp</code> mirroring output to <code>autolabel.log</code>. Added <code>.gitattributes</code>,
+      <code>.vscode/launch.json</code>, build-output rules in <code>.gitignore</code>, and the shared
+      <code>docs/style.css</code> (copied from InferenceVisualizer). All conventions deliberately match
+      InferenceVisualizer.</li>
+</ul>
+
+<hr />
+<p class="subtitle">Document updated as the project evolves. Each phase appends a changelog entry and updates the relevant sections above.</p>
+
+</main>
+</body>
+</html>
