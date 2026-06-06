@@ -17,6 +17,7 @@ class ClassColors;
 class QGraphicsScene;
 class QGraphicsPixmapItem;
 class QImage;
+class QEvent;
 class QTimer;
 
 // ImageView: the annotation canvas. It displays one image fitted to the window
@@ -65,6 +66,7 @@ protected:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
+    void leaveEvent(QEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
@@ -119,6 +121,7 @@ private:
 
     int      m_hoverShape  = -1;      // committed vertex under the cursor (idle)
     int      m_hoverVertex = -1;
+    int      m_hoverFillShape = -1;   // committed shape whose body is under the cursor
 
     Q_DISABLE_COPY(ImageView)
 };

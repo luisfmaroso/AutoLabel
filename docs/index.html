@@ -64,6 +64,16 @@
       now File &middot; SAM &middot; Settings &middot; Help). Buttons reuse the same <code>QAction</code>s as the
       shortcuts via <code>setDefaultAction</code>. <em>Accept</em> commits the pending shape (and finalizes an
       in-progress polygon with &ge;3 points), then asks for the class &mdash; the same thing Enter does.</li>
+  <li><strong>Hover highlight.</strong> Moving the cursor over a committed rectangle or polygon fills it with a
+      translucent version of its class colour (via <code>hitShape</code> + <code>drawPolygon</code> in
+      <code>drawForeground</code>), so it's easy to see which shape you're about to edit/delete; it clears on
+      <code>leaveEvent</code>.</li>
+  <li><strong>Tracking output matches the seed shape.</strong> Detection vs segmentation now works: if you seed
+      tracking with a <strong>Rectangle</strong>, each predicted frame returns a <em>bounding box</em>
+      (<code>cv2.boundingRect</code> of the tracked mask) committed as a Rectangle &rarr; YOLO detection line; a
+      <strong>Polygon</strong> seed returns a polygon &rarr; YOLO-seg line. The seed type is sent to the backend
+      (<code>track_seed</code> "output": rectangle|polygon) and <code>track_step</code> returns
+      <code>shape</code> + <code>points</code> accordingly.</li>
   <li><strong>Point-prompts removed.</strong> The single-image click-to-segment feature (SAM point mode +
       Generate/Accept/Clear-Points + the backend <code>segment</code> command) is gone now that video tracking
       covers SAM use. As a side benefit, <code>load_model</code> now builds the <em>video</em> predictor up
@@ -579,9 +589,14 @@ C:\Projects\AutoLabel\build\bin\AutoLabel.exe</code></pre>
       automatic). <code>load_model</code> builds the <em>video</em> predictor so "ready" matches what tracking uses.
       Added a <strong>model picker</strong> (the <em>SAM</em> menu = Tiny/Small/Base+/Large radio items, persisted,
       live reload, missing-checkpoint error dialog; Reset Tracking lives only on the bottom bar). Fixed a shutdown assert by disconnecting process&rarr;backend
-      signals in <code>~SamBackend</code> before <code>waitForFinished()</code>. Verified: clean build; backend
-      protocol (load&rarr;seed&rarr;step) tracks the synthetic clip; GUI auto-starts to "SAM2 ready" ~3&nbsp;s after
-      launch and exits cleanly under gdb (no assert).</li>
+      signals in <code>~SamBackend</code> before <code>waitForFinished()</code>. Added an <em>Accept (Enter)</em>
+      bottom-bar button (commits the pending shape / finalizes an in-progress polygon). <strong>Tracking output now
+      follows the seed shape</strong>: a Rectangle seed returns per-frame bounding boxes
+      (<code>cv2.boundingRect</code>) &rarr; YOLO detection lines, a Polygon seed returns polygons &rarr; YOLO-seg
+      lines (<code>track_seed</code> carries an "output" field; <code>track_step</code> returns
+      <code>shape</code>+<code>points</code>). Verified: clean build; backend protocol exercises both detection
+      (box) and segmentation (polygon) tracking on the synthetic clip; GUI auto-starts to "SAM2 ready" ~3&nbsp;s
+      after launch and exits cleanly under gdb (no assert).</li>
   <li><strong>2026-06-04 &mdash; Phase 8 (video tracking, SAA-style per-frame).</strong> The thesis workflow, rebuilt
       to match exactly: draw a polygon by hand &rarr; <kbd>M</kbd> loads it into SAM2 memory &rarr; <kbd>Space</kbd>
       predicts one frame at a time on demand &rarr; reset + re-seed when it degrades. The seed is a hand-drawn polygon

@@ -214,7 +214,7 @@ void SamBackend::loadModel(const QString &checkpoint, const QString &config,
 }
 
 void SamBackend::seedMemory(const QStringList &frames, int seedFrame,
-                            const QList<QPointF> &polygon)
+                            const QList<QPointF> &polygon, const QString &outputShape)
 {
     QJsonArray jsonFrames;
     for (const QString &f : frames) {
@@ -229,6 +229,7 @@ void SamBackend::seedMemory(const QStringList &frames, int seedFrame,
         { "frames", jsonFrames },
         { "seed_frame", seedFrame },
         { "polygon", jsonPolygon },
+        { "output", outputShape },
     });
 }
 

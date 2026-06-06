@@ -462,7 +462,8 @@ void MainWindow::loadPolygonToMemory()
         return;
     }
 
-    // Use the last committed shape as the object; its class is applied to predictions.
+    // Use the last committed shape as the object; its class is applied to
+    // predictions, and its TYPE decides whether tracking returns boxes or polygons.
     const Shape seed = m_annotations->shapes().last();
     QList<QPointF> polygon;
     if (seed.type == Shape::Type::Rectangle && seed.points.size() == 2) {
@@ -476,11 +477,16 @@ void MainWindow::loadPolygonToMemory()
         return;
     }
 
+    const QString outputShape =
+        seed.type == Shape::Type::Rectangle ? QStringLiteral("rectangle")
+                                            : QStringLiteral("polygon");
+
     m_trackClassId  = seed.classId >= 0 ? seed.classId : m_lastClassId;
     m_memorySeeded  = true;
-    m_sam->seedMemory(m_imagePaths, m_currentIndex, polygon);
+    m_sam->seedMemory(m_imagePaths, m_currentIndex, polygon, outputShape);
     statusBar()->showMessage(
-        tr("Loading polygon to SAM memory... then go to the next frame and press Space."), 5000);
+        tr("Loaded %1 to SAM memory... go to the next frame and press Space.")
+            .arg(outputShape == QStringLiteral("rectangle") ? tr("box") : tr("polygon")), 5000);
 }
 
 void MainWindow::predictThisFrame()
@@ -547,9 +553,11 @@ void MainWindow::onSamResponse(const QJsonObject &reply)
                          reply.value(QStringLiteral("height")).toInt());
 
         Shape s;
-        s.type = Shape::Type::Polygon;
+        s.type = reply.value(QStringLiteral("shape")).toString() == QStringLiteral("rectangle")
+                     ? Shape::Type::Rectangle
+                     : Shape::Type::Polygon;
         s.classId = m_trackClassId;
-        for (const QJsonValue &pt : reply.value(QStringLiteral("polygon")).toArray()) {
+        for (const QJsonValue &pt : reply.value(QStringLiteral("points")).toArray()) {
             const QJsonArray xy = pt.toArray();
             if (xy.size() == 2) {
                 s.points.append(QPointF(xy[0].toDouble(), xy[1].toDouble()));
@@ -633,9 +641,8 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this,
         tr("About AutoLabel"),
-        tr("<b>AutoLabel</b> %1<br><br>"
+        tr("<b>AutoLabel</b><br><br>"
            "A lightweight image annotation tool for building YOLO segmentation "
-           "datasets with Meta SAM2.<br><br>"
-           "Part of the same software family as InferenceVisualizer.")
-            .arg(QApplication::applicationVersion()));
+           "datasets with Meta SAM2.<br>"
+           "Download the SAM2 model and save it in the models directory."));
 }

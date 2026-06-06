@@ -39,8 +39,10 @@ public slots:
                    const QString &sam2Root, const QString &device);
 
     // Load `polygon` on frame `seedFrame` into SAM2's video memory (a conditioning
-    // frame). `frames` is the whole ordered sequence. Memory accumulates across calls.
-    void seedMemory(const QStringList &frames, int seedFrame, const QList<QPointF> &polygon);
+    // frame). `frames` is the whole ordered sequence. `outputShape` is "rectangle"
+    // (bounding box) or "polygon" -- the geometry track_step should return.
+    void seedMemory(const QStringList &frames, int seedFrame,
+                    const QList<QPointF> &polygon, const QString &outputShape);
 
     // Predict ONE frame from the current memory (on-demand, per frame).
     void predictFrame(int targetFrame);

@@ -40,8 +40,9 @@ _frames_sig = None         # signature of the staged frame list (rebuild only if
 _track_state = None        # resident inference_state (holds conditioning/memory frames)
 _track_state_sig = None    # which staged frames the resident state belongs to
 _track_gen = None          # live propagate_in_video generator, stepped one frame per request
-_track_cache = {}          # frame_idx -> polygon, for frames already yielded
+_track_cache = {}          # frame_idx -> geometry dict (or None), for yielded frames
 _track_wh = (0, 0)         # (width, height) of the staged frames
+_track_output = "polygon"  # desired result shape: "polygon" or "rectangle" (box)
 
 # Remembered model args from load_model, reused to build the video predictor.
 _model_cfg = None
@@ -114,6 +115,21 @@ def _mask_to_polygon(mask_uint8):
     return poly if len(poly) >= 3 else None
 
 
+def _mask_to_geometry(mask_uint8, output):
+    """Convert a 0/1 mask to the requested geometry, or None if empty.
+      output == "rectangle" -> {"shape":"rectangle","points":[[x0,y0],[x1,y1]]} (bbox)
+      otherwise             -> {"shape":"polygon","points":[[x,y],...]}
+    """
+    if output == "rectangle":
+        import cv2
+        x, y, w, h = cv2.boundingRect(mask_uint8)
+        if w < 2 or h < 2:
+            return None
+        return {"shape": "rectangle", "points": [[int(x), int(y)], [int(x + w), int(y + h)]]}
+    poly = _mask_to_polygon(mask_uint8)
+    return {"shape": "polygon", "points": poly} if poly is not None else None
+
+
 def _stage_frames(frames):
     """SAM2's video API needs a folder of JPEGs named <index>.jpg. Build one
     (cached, rebuilt only when the frame list changes) and return its path."""
@@ -156,7 +172,7 @@ def _track_seed(req: dict) -> dict:
     """Step 3: load the current frame's polygon into SAM2 memory (a conditioning
     frame). Subsequent track_step calls predict other frames from this memory."""
     global _track_state, _track_state_sig
-    global _track_gen, _track_cache, _track_wh
+    global _track_gen, _track_cache, _track_wh, _track_output
     import cv2
     import torch
 
@@ -166,6 +182,7 @@ def _track_seed(req: dict) -> dict:
     frames = req.get("frames", [])
     seed_frame = int(req.get("seed_frame", 0))
     polygon = req.get("polygon", [])
+    _track_output = "rectangle" if req.get("output") == "rectangle" else "polygon"
     if len(frames) < 1:
         return {"status": "error", "message": "no frames"}
     if len(polygon) < 3:
@@ -213,32 +230,34 @@ def _track_step(req: dict) -> dict:
     target = int(req.get("target", -1))
     w, h = _track_wh
 
+    def reply(geom):
+        out = {"status": "ok", "frame": target, "width": int(w), "height": int(h),
+               "shape": (geom["shape"] if geom else ""),
+               "points": (geom["points"] if geom else [])}
+        out["message"] = "predicted" if geom else "object lost on this frame"
+        return out
+
     if target in _track_cache:
-        poly = _track_cache[target]
-        return {"status": "ok", "message": "cached", "frame": target,
-                "width": int(w), "height": int(h), "polygon": poly or []}
+        return reply(_track_cache[target])
 
     with torch.inference_mode():
         if _track_gen is None:
             _track_gen = _video_predictor.propagate_in_video(_track_state)
-        found = None
         while True:
             try:
                 fidx, _obj_ids, mask_logits = next(_track_gen)
             except StopIteration:
                 break
             m = (mask_logits[0, 0] > 0.0).cpu().numpy().astype(np.uint8)
-            _track_cache[int(fidx)] = _mask_to_polygon(m)
+            _track_cache[int(fidx)] = _mask_to_geometry(m, _track_output)
             if int(fidx) == target:
-                found = _track_cache[int(fidx)]
                 break
 
-    if found is None and target not in _track_cache:
+    if target not in _track_cache:
         return {"status": "ok", "message": "frame not reachable from memory (re-seed?)",
-                "frame": target, "width": int(w), "height": int(h), "polygon": []}
-    poly = _track_cache.get(target)
-    return {"status": "ok", "message": ("predicted" if poly else "object lost on this frame"),
-            "frame": target, "width": int(w), "height": int(h), "polygon": poly or []}
+                "frame": target, "width": int(w), "height": int(h),
+                "shape": "", "points": []}
+    return reply(_track_cache.get(target))
 
 
 def handle(request: dict) -> dict:

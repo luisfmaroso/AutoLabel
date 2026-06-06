@@ -3,6 +3,7 @@
 #include "annotation/AnnotationModel.h"
 #include "annotation/ClassColors.h"
 
+#include <QEvent>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsScene>
 #include <QImage>
@@ -134,7 +135,7 @@ void ImageView::resetInteraction()
     cancelLongPress();
     m_dragging = false;
     m_dragShape = m_dragVertex = -1;
-    m_hoverShape = m_hoverVertex = -1;
+    m_hoverShape = m_hoverVertex = m_hoverFillShape = -1;
     unsetCursor();
 }
 
@@ -389,11 +390,14 @@ void ImageView::mouseMoveEvent(QMouseEvent *event)
         return;
     }
 
-    // Idle: highlight a committed vertex under the cursor.
+    // Idle: highlight the committed vertex under the cursor, and fill the shape
+    // the cursor is over.
     const VertexHit vh = hitVertex(m_cursor);
-    if (vh.shape != m_hoverShape || vh.vertex != m_hoverVertex) {
+    const int fill = hitShape(m_cursor);
+    if (vh.shape != m_hoverShape || vh.vertex != m_hoverVertex || fill != m_hoverFillShape) {
         m_hoverShape = vh.shape;
         m_hoverVertex = vh.vertex;
+        m_hoverFillShape = fill;
         setCursor(vh.shape >= 0 ? Qt::OpenHandCursor : Qt::ArrowCursor);
         viewport()->update();
     }
@@ -412,6 +416,16 @@ void ImageView::mouseReleaseEvent(QMouseEvent *event)
     }
     if (m_pressActive && event->button() == Qt::LeftButton) {
         cancelLongPress();  // a quick tap on a feature: no drag
+    }
+}
+
+void ImageView::leaveEvent(QEvent *event)
+{
+    QGraphicsView::leaveEvent(event);
+    // Drop hover highlights when the cursor leaves the canvas.
+    if (m_hoverShape >= 0 || m_hoverVertex >= 0 || m_hoverFillShape >= 0) {
+        m_hoverShape = m_hoverVertex = m_hoverFillShape = -1;
+        viewport()->update();
     }
 }
 
@@ -537,6 +551,15 @@ void ImageView::drawForeground(QPainter *painter, const QRectF &)
             const ::Shape &s = (m_dragging && i == m_dragShape) ? m_dragWorking : shapes[i];
             const QColor color = m_classColors ? m_classColors->colorFor(s.classId)
                                                : kFallbackColor;
+            // Hover highlight: translucent fill of the shape under the cursor.
+            if (i == m_hoverFillShape && !m_dragging) {
+                QColor fill = color;
+                fill.setAlpha(90);
+                painter->setPen(Qt::NoPen);
+                painter->setBrush(fill);
+                painter->drawPolygon(shapeOutline(s));
+                painter->setBrush(Qt::NoBrush);
+            }
             pen.setColor(color);
             painter->setPen(pen);
             drawShape(painter, s, radius);
