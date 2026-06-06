@@ -135,41 +135,25 @@ void ImageView::resetInteraction()
     m_dragging = false;
     m_dragShape = m_dragVertex = -1;
     m_hoverShape = m_hoverVertex = -1;
-    if (!m_samPoints.isEmpty() || !m_samLabels.isEmpty()) {
-        m_samPoints.clear();
-        m_samLabels.clear();
-        emit samPromptsChanged();
-    }
     unsetCursor();
-}
-
-void ImageView::clearSamPrompts()
-{
-    m_samPoints.clear();
-    m_samLabels.clear();
-    m_pending = false;
-    m_pendingShape = ::Shape();
-    emit samPromptsChanged();
-    viewport()->update();
-}
-
-void ImageView::setSamPreview(const QList<QPointF> &polygon)
-{
-    if (polygon.size() < 3) {
-        return;
-    }
-    m_pendingShape = ::Shape();
-    m_pendingShape.type   = ::Shape::Type::Polygon;
-    m_pendingShape.points = QVector<QPointF>(polygon.begin(), polygon.end());
-    m_pending = true;
-    viewport()->update();
 }
 
 void ImageView::acceptPendingShape()
 {
+    // Convenience: if the user is mid-polygon with enough points but hasn't
+    // clicked back on the first vertex, Accept finalizes it for them.
+    if (!m_pending && m_drawing && m_mode == Mode::Polygon && m_current.size() >= 3) {
+        m_pendingShape = ::Shape();
+        m_pendingShape.type   = ::Shape::Type::Polygon;
+        m_pendingShape.points = m_current;
+        m_pending  = true;
+        m_drawing  = false;
+        m_current.clear();
+    }
+
     if (m_pending && m_pendingShape.isComplete()) {
         const ::Shape shape = m_pendingShape;
-        resetInteraction();       // also clears SAM prompts
+        resetInteraction();
         viewport()->update();
         emit shapeDrawn(shape);   // MainWindow assigns class + exports
     }
@@ -281,25 +265,6 @@ void ImageView::mousePressEvent(QMouseEvent *event)
     }
 
     const QPointF pos = clampToImage(mapToScene(event->pos()));
-
-    // SAM mode: clicks are prompt points (left = positive, right = negative).
-    // A new point invalidates any stale preview, so the user re-generates.
-    if (m_mode == Mode::Sam) {
-        if (event->button() == Qt::LeftButton) {
-            m_samPoints.append(pos);
-            m_samLabels.append(1);
-        } else if (event->button() == Qt::RightButton) {
-            m_samPoints.append(pos);
-            m_samLabels.append(0);
-        } else {
-            return;
-        }
-        m_pending = false;
-        m_pendingShape = ::Shape();
-        emit samPromptsChanged();
-        viewport()->update();
-        return;
-    }
 
     if (m_pending) {
         return;  // pending shape: only Enter/Esc proceed
@@ -458,8 +423,7 @@ void ImageView::keyPressEvent(QKeyEvent *event)
         acceptPendingShape();
         return;
     case Qt::Key_Escape:
-        if (m_drawing || m_pending || m_dragging || m_pressActive
-            || !m_samPoints.isEmpty()) {
+        if (m_drawing || m_pending || m_dragging || m_pressActive) {
             resetInteraction();
             viewport()->update();
         }
@@ -622,23 +586,6 @@ void ImageView::drawForeground(QPainter *painter, const QRectF &)
         painter->setBrush(kDrawingColor);
         for (const QPointF &p : m_current) {
             painter->drawEllipse(p, radius, radius);
-        }
-        painter->setBrush(Qt::NoBrush);
-    }
-
-    // SAM prompt points: green = positive, red = negative, white outline.
-    if (!m_samPoints.isEmpty()) {
-        const double r = (kVertexRadiusPx + 2.0) / scale;
-        QPen dot;
-        dot.setCosmetic(true);
-        dot.setColor(Qt::white);
-        dot.setWidth(1);
-        painter->setPen(dot);
-        for (int i = 0; i < m_samPoints.size(); ++i) {
-            const bool positive = m_samLabels.value(i, 1) != 0;
-            painter->setBrush(positive ? QColor(0x2e, 0xcc, 0x40)   // green
-                                       : QColor(0xff, 0x41, 0x36)); // red
-            painter->drawEllipse(m_samPoints[i], r, r);
         }
         painter->setBrush(Qt::NoBrush);
     }

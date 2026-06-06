@@ -8,6 +8,8 @@ target_sources(AutoLabel PRIVATE
     app/MainWindow.cpp
     ui/ImageView.h
     ui/ImageView.cpp
+    ui/ControlBar.h
+    ui/ControlBar.cpp
     ui/SettingsDialog.h
     ui/SettingsDialog.cpp
     annotation/Shape.h

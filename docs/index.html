@@ -9,7 +9,7 @@
 <main>
 
 <h1>AutoLabel</h1>
-<p class="subtitle">A lightweight image annotation tool for building YOLO segmentation datasets with Meta SAM2. Built to feel like a natural extension of <strong>InferenceVisualizer</strong> &mdash; same layout, architecture, and Qt patterns. Current phase: <strong>Phase 8 &mdash; Video propagation</strong>.</p>
+<p class="subtitle">A lightweight image annotation tool for building YOLO segmentation datasets with Meta SAM2. Built to feel like a natural extension of <strong>InferenceVisualizer</strong> &mdash; same layout, architecture, and Qt patterns. Current phase: <strong>Polish &mdash; quality-of-life pass</strong>.</p>
 
 <nav class="toc">
   <strong>Contents</strong>
@@ -45,7 +45,34 @@
   disagree, AutoLabel follows InferenceVisualizer so the two apps feel like one software family.
 </p>
 
-<h2 id="phase">2. Current phase <span class="badge">Phase 8 &mdash; Video propagation</span></h2>
+<h2 id="phase">2. Current phase <span class="badge">Polish &mdash; QoL pass</span></h2>
+<p>With all ten phases functional, this is an ergonomics pass:</p>
+<ul>
+  <li><strong>Fully automatic backend.</strong> On launch the app starts the Python backend and loads the SAM2
+      model with no user action &mdash; <em>Start Backend</em> and the old <em>Load Model</em> button are gone
+      entirely. The bottom-bar <em>SAM status</em> shows <em>starting&hellip; &rarr; loading model&hellip; &rarr;
+      ready</em>; any failure (no Python, bad checkpoint, crash) raises an <strong>error dialog</strong>
+      (<code>QMessageBox</code>). <em>Ping</em> removed.</li>
+  <li><strong>Model picker.</strong> The <em>SAM</em> menu lists the variants
+      (Tiny / Small / Base+ / Large) as radio items; the choice persists (<code>QSettings</code>) and reloads the model live.
+      Default is <strong>Tiny</strong>. Selecting a variant whose <code>.pt</code> isn't in <code>models/</code>
+      shows an error dialog pointing at <code>models/README.md</code>.</li>
+  <li><strong>On-screen controls.</strong> A new bottom <code>ControlBar</code> (mirroring IV's
+      <code>VideoControls</code>) carries the everyday controls as buttons: <em>Prev / counter / Next</em>,
+      <em>Rectangle / Polygon</em> + <em>Accept (Enter)</em>, and <em>Load to Memory (M) / Predict (Space) /
+      Reset</em>, with a status light. The <em>Annotate</em> and <em>Image</em> menus are gone (the menu bar is
+      now File &middot; SAM &middot; Settings &middot; Help). Buttons reuse the same <code>QAction</code>s as the
+      shortcuts via <code>setDefaultAction</code>. <em>Accept</em> commits the pending shape (and finalizes an
+      in-progress polygon with &ge;3 points), then asks for the class &mdash; the same thing Enter does.</li>
+  <li><strong>Point-prompts removed.</strong> The single-image click-to-segment feature (SAM point mode +
+      Generate/Accept/Clear-Points + the backend <code>segment</code> command) is gone now that video tracking
+      covers SAM use. As a side benefit, <code>load_model</code> now builds the <em>video</em> predictor up
+      front, so "ready" reflects exactly what tracking uses.</li>
+  <li><strong>Shutdown-crash fix.</strong> <code>~SamBackend</code> now disconnects the process&rarr;backend
+      signals before <code>waitForFinished()</code>, so a buffered reply can't fire <code>onSamResponse</code>
+      into an already-destructing <code>MainWindow</code> (a Qt teardown-ordering assert).</li>
+</ul>
+<details><summary style="cursor:pointer">Phase 8 &mdash; Video tracking (the core SAM workflow)</summary>
 <p>This is the workflow the project was really built for (the user's thesis use case: a 360&deg; video of a
    corroded steel piece, split into frames). It mirrors SegmentAnythingAnnotator's <em>Add Key Frame</em> +
    <em>Propagate</em>, but on SAM2's built-in <strong>video predictor</strong> &mdash; so no separate
@@ -64,13 +91,14 @@
 <p><strong>Per-frame, on demand.</strong> Prediction is one frame at a time, not an upfront whole-sequence pass:
    the backend keeps the <code>inference_state</code> resident and drives a single <code>propagate_in_video</code>
    generator <em>stepped one frame per <kbd>Space</kbd></em> (cached so you only pay once per frame). Commands:
-   <code>track_seed</code> (stage frames as numeric JPEGs &rarr; build video predictor lazily &rarr;
-   <code>add_new_mask</code>), <code>track_step</code> (advance the generator to the requested frame &rarr; mask
+   <code>track_seed</code> (stage frames as numeric JPEGs &rarr; <code>add_new_mask</code> on the resident
+   video predictor), <code>track_step</code> (advance the generator to the requested frame &rarr; mask
    &rarr; contour &rarr; polygon), <code>reset_tracking</code> (drop the state/generator/cache). Verified on a
    synthetic moving-square clip: seed frame&nbsp;0, then <kbd>Space</kbd> on frames 1&ndash;3 each returned the
    correctly-shifted polygon, ~2.5&nbsp;s/frame on CPU.</p>
 <p><em>Note: CPU prediction is ~seconds per frame; one object/class per memory; a prediction replaces that frame's
    annotation (single-object tracking).</em></p>
+</details>
 <details><summary style="cursor:pointer">Earlier: Phases 6&ndash;7 &mdash; Interactive SAM workflow</summary>
 <p>The SAM2 service is now wired into the canvas as an interactive workflow (mask visualization + the
    Generate/Accept/Clear cycle, folded together since the service already returns ready-to-draw polygons). A new
@@ -152,6 +180,8 @@
 &#9474;   &#9500;&#9472;&#9472; ui/                     <span class="cm"># reusable widgets</span>
 &#9474;   &#9474;   &#9500;&#9472;&#9472; ImageView.h         <span class="cm"># QGraphicsView annotation canvas (draw + edit)</span>
 &#9474;   &#9474;   &#9500;&#9472;&#9472; ImageView.cpp
+&#9474;   &#9474;   &#9500;&#9472;&#9472; ControlBar.h        <span class="cm"># bottom on-screen control bar (buttons + SAM status)</span>
+&#9474;   &#9474;   &#9500;&#9472;&#9472; ControlBar.cpp
 &#9474;   &#9474;   &#9500;&#9472;&#9472; SettingsDialog.h    <span class="cm"># class-id -> colour table (QColorDialog)</span>
 &#9474;   &#9474;   &#9492;&#9472;&#9472; SettingsDialog.cpp
 &#9474;   &#9500;&#9472;&#9472; annotation/             <span class="cm"># Phase 3: annotation data + YOLO I/O</span>
@@ -532,6 +562,26 @@ C:\Projects\AutoLabel\build\bin\AutoLabel.exe</code></pre>
 
 <h2 id="changelog">8. Changelog</h2>
 <ul>
+  <li><strong>2026-06-04 &mdash; Quality-of-life pass.</strong> <strong>Auto-start</strong>: the constructor
+      starts the backend and, on <code>SamBackend::started</code>, auto-calls <code>loadSamModel()</code>; the
+      bottom-bar status cycles starting&hellip; &rarr; loading model&hellip; &rarr; ready. Failures now raise a
+      <code>QMessageBox</code> (critical for process start/crash via <code>errorOccurred</code>, warning for a
+      failed <code>load_model</code> reply), guarded so it shows once. SAM-dependent actions are disabled until
+      ready (<code>setSamReady</code>). New on-screen <strong><code>ui/ControlBar</code></strong> (bottom widget,
+      IV's <code>VideoControls</code> pattern): Prev/counter/Next, Rectangle/Polygon toggles, Load-to-Memory(M)/
+      Predict(Space)/Reset, Start/Load, and a colour-coded SAM status label &mdash; all backed by shared
+      <code>QAction</code>s via <code>setDefaultAction</code> (including an <em>Accept (Enter)</em> button that
+      commits the pending shape / finalizes an in-progress polygon). <code>MainWindow</code> gained
+      <code>buildActions()</code>; the <em>Annotate</em> and <em>Image</em> menus were removed (menu bar is now
+      File/SAM/Settings/Help). <strong>Removed</strong> the point-prompt feature entirely (<code>ImageView::Mode::Sam</code>,
+      prompt points, Generate/Accept/Clear, <code>SamBackend::segment</code>, python <code>_segment</code>),
+      <strong>Ping</strong>, and the manual <em>Start Backend</em> / <em>Load Model</em> buttons (now fully
+      automatic). <code>load_model</code> builds the <em>video</em> predictor so "ready" matches what tracking uses.
+      Added a <strong>model picker</strong> (the <em>SAM</em> menu = Tiny/Small/Base+/Large radio items, persisted,
+      live reload, missing-checkpoint error dialog; Reset Tracking lives only on the bottom bar). Fixed a shutdown assert by disconnecting process&rarr;backend
+      signals in <code>~SamBackend</code> before <code>waitForFinished()</code>. Verified: clean build; backend
+      protocol (load&rarr;seed&rarr;step) tracks the synthetic clip; GUI auto-starts to "SAM2 ready" ~3&nbsp;s after
+      launch and exits cleanly under gdb (no assert).</li>
   <li><strong>2026-06-04 &mdash; Phase 8 (video tracking, SAA-style per-frame).</strong> The thesis workflow, rebuilt
       to match exactly: draw a polygon by hand &rarr; <kbd>M</kbd> loads it into SAM2 memory &rarr; <kbd>Space</kbd>
       predicts one frame at a time on demand &rarr; reset + re-seed when it degrades. The seed is a hand-drawn polygon

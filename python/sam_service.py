@@ -17,26 +17,24 @@ which the C++ side mirrors into its log.
 
 Commands
 --------
-ping        -> {"status":"ok","message":"pong"}
-load_model  -> build the SAM2 predictor once and keep it resident.
-              args: checkpoint, config, sam2_root, device
-segment     -> run SAM2 on an image with point prompts, return polygon(s).
-              args: image_path, points [[x,y],...], labels [1|0,...]
-shutdown    -> exit the loop.
+load_model     -> build the SAM2 video predictor once and keep it resident.
+                  args: checkpoint, config, sam2_root, device
+track_seed     -> load a frame's polygon into memory (a conditioning frame).
+                  args: frames [paths...], seed_frame, polygon [[x,y],...]
+track_step     -> predict ONE frame from memory. args: target (frame index)
+reset_tracking -> forget all tracking memory.
+shutdown       -> exit the loop.
 
-torch / sam2 are imported lazily inside load_model, so `ping` works without the
-heavy ML stack present.
+torch / sam2 are imported lazily inside load_model, so the process starts (and
+shuts down) without the heavy ML stack present.
 """
 
 import json
 import sys
 
 # Resident state -- the whole point of a long-lived process.
-_predictor = None          # SAM2ImagePredictor (image mode)
-_image_path = None         # path currently set on the predictor (embedding cache)
-
 # Video propagation state.
-_video_predictor = None    # SAM2 video predictor (built lazily on first propagate)
+_video_predictor = None    # SAM2 video predictor (built once by load_model)
 _frames_dir = None         # temp dir of numeric JPEGs staged for the video API
 _frames_sig = None         # signature of the staged frame list (rebuild only if it changes)
 _track_state = None        # resident inference_state (holds conditioning/memory frames)
@@ -57,8 +55,8 @@ def log(message: str) -> None:
 
 
 def _load_model(req: dict) -> dict:
-    global _predictor, _image_path
     global _model_cfg, _model_ckpt, _model_device, _model_sam2_root, _video_predictor
+    global _track_state, _track_state_sig, _track_gen, _track_cache
     import os
 
     checkpoint = req["checkpoint"]
@@ -72,18 +70,21 @@ def _load_model(req: dict) -> dict:
     if not os.path.isfile(checkpoint):
         return {"status": "error", "message": f"checkpoint not found: {checkpoint}"}
 
-    log(f"loading SAM2: config={config} checkpoint={checkpoint} device={device}")
+    log(f"loading SAM2 video predictor: config={config} checkpoint={checkpoint} device={device}")
     import torch  # noqa: F401 (ensures a clear error if torch is missing)
-    from sam2.build_sam import build_sam2
-    from sam2.sam2_image_predictor import SAM2ImagePredictor
+    from sam2.build_sam import build_sam2_video_predictor
 
-    model = build_sam2(config, checkpoint, device=device)
-    _predictor = SAM2ImagePredictor(model)
-    _image_path = None
-
-    # Remember args so propagate can build the video predictor with the same model.
+    # Build the *video* predictor up front -- that's what tracking uses, so a
+    # successful load means we're genuinely ready and the first prediction isn't
+    # slowed by a model build.
+    _video_predictor = build_sam2_video_predictor(config, checkpoint, device=device)
     _model_cfg, _model_ckpt, _model_device, _model_sam2_root = config, checkpoint, device, sam2_root
-    _video_predictor = None  # force a rebuild against the new model
+
+    # Any previous tracking memory belongs to the old model -- drop it.
+    _track_state = None
+    _track_state_sig = None
+    _track_gen = None
+    _track_cache = {}
 
     log("SAM2 ready")
     return {"status": "ok", "message": f"model loaded (device={device})", "device": device}
@@ -154,12 +155,12 @@ def _reset_tracking(req: dict) -> dict:
 def _track_seed(req: dict) -> dict:
     """Step 3: load the current frame's polygon into SAM2 memory (a conditioning
     frame). Subsequent track_step calls predict other frames from this memory."""
-    global _video_predictor, _track_state, _track_state_sig
+    global _track_state, _track_state_sig
     global _track_gen, _track_cache, _track_wh
     import cv2
     import torch
 
-    if _model_ckpt is None:
+    if _video_predictor is None:
         return {"status": "error", "message": "model not loaded; send load_model first"}
 
     frames = req.get("frames", [])
@@ -177,11 +178,6 @@ def _track_seed(req: dict) -> dict:
         return {"status": "error", "message": f"failed to read seed frame: {frames[seed_frame]}"}
     h, w = seed_img.shape[:2]
     _track_wh = (w, h)
-
-    if _video_predictor is None:
-        from sam2.build_sam import build_sam2_video_predictor
-        log("building SAM2 video predictor")
-        _video_predictor = build_sam2_video_predictor(_model_cfg, _model_ckpt, device=_model_device)
 
     frames_dir = _stage_frames(frames)
 
@@ -245,76 +241,10 @@ def _track_step(req: dict) -> dict:
             "frame": target, "width": int(w), "height": int(h), "polygon": poly or []}
 
 
-def _segment(req: dict) -> dict:
-    global _image_path
-    import os
-    import cv2
-    import numpy as np
-
-    if _predictor is None:
-        return {"status": "error", "message": "model not loaded; send load_model first"}
-
-    image_path = req["image_path"]
-    points = req.get("points", [])
-    labels = req.get("labels", [])
-    if not points:
-        return {"status": "error", "message": "no prompt points given"}
-    if len(points) != len(labels):
-        return {"status": "error", "message": "points and labels length mismatch"}
-    if not os.path.isfile(image_path):
-        return {"status": "error", "message": f"image not found: {image_path}"}
-
-    # Set (and cache) the image so repeated clicks on the same image don't
-    # recompute the expensive image embedding.
-    if image_path != _image_path:
-        bgr = cv2.imread(image_path)
-        if bgr is None:
-            return {"status": "error", "message": f"failed to read image: {image_path}"}
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        _predictor.set_image(rgb)
-        _image_path = image_path
-        log(f"image set: {image_path} {rgb.shape}")
-
-    masks, scores, _ = _predictor.predict(
-        point_coords=np.asarray(points, dtype=np.float32),
-        point_labels=np.asarray(labels, dtype=np.int32),
-        multimask_output=True,
-    )
-    best = int(np.argmax(scores))
-    mask = (masks[best] > 0).astype(np.uint8)
-    h, w = mask.shape[:2]
-
-    # Mask -> polygons via contour extraction + simplification (Phase 8 logic,
-    # done here in the backend where cv2 already lives).
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    polygons = []
-    for c in sorted(contours, key=cv2.contourArea, reverse=True):
-        if cv2.contourArea(c) < 25:  # drop specks
-            continue
-        peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, max(2.0, 0.01 * peri), True)
-        poly = [[int(p[0][0]), int(p[0][1])] for p in approx]
-        if len(poly) >= 3:
-            polygons.append(poly)
-
-    return {
-        "status": "ok",
-        "message": f"{len(polygons)} polygon(s)",
-        "score": round(float(scores[best]), 4),
-        "width": int(w),
-        "height": int(h),
-        "polygons": polygons,
-    }
-
-
 def handle(request: dict) -> dict:
     command = request.get("command")
-    if command == "ping":
-        return {"status": "ok", "message": "pong"}
     if command == "load_model":
         return _load_model(request)
-    if command == "segment":
-        return _segment(request)
     if command == "track_seed":
         return _track_seed(request)
     if command == "track_step":

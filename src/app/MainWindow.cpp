@@ -3,12 +3,14 @@
 #include "annotation/AnnotationModel.h"
 #include "annotation/YoloIo.h"
 #include "backend/SamBackend.h"
+#include "ui/ControlBar.h"
 #include "ui/ImageView.h"
 #include "ui/SettingsDialog.h"
 
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <QColor>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -25,6 +27,8 @@
 #include <QRectF>
 #include <QSettings>
 #include <QStatusBar>
+#include <QVBoxLayout>
+#include <QWidget>
 
 namespace {
 
@@ -33,6 +37,22 @@ const QStringList kImageExtensions = {
     "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif",
     "*.tif", "*.tiff", "*.webp"
 };
+
+// The selectable SAM 2.1 model variants (checkpoint file in models/, matching
+// config from the submodule). Index 0 (Tiny) is the default. Larger variants are
+// more accurate but much slower on CPU, and must be downloaded into models/.
+struct SamModel {
+    const char *name;
+    const char *checkpoint;
+    const char *config;
+};
+const SamModel kSamModels[] = {
+    { "Tiny",  "sam2.1_hiera_tiny.pt",       "configs/sam2.1/sam2.1_hiera_t.yaml"  },
+    { "Small", "sam2.1_hiera_small.pt",      "configs/sam2.1/sam2.1_hiera_s.yaml"  },
+    { "Base+", "sam2.1_hiera_base_plus.pt",  "configs/sam2.1/sam2.1_hiera_b+.yaml" },
+    { "Large", "sam2.1_hiera_large.pt",      "configs/sam2.1/sam2.1_hiera_l.yaml"  },
+};
+constexpr int kSamModelCount = int(sizeof(kSamModels) / sizeof(kSamModels[0]));
 
 } // namespace
 
@@ -47,10 +67,13 @@ MainWindow::MainWindow(QWidget *parent)
 
     QSettings settings;
     m_classColors.load(settings);
+    m_modelIndex = qBound(0, settings.value(QStringLiteral("samModelIndex"), 0).toInt(),
+                          kSamModelCount - 1);
 
     m_view->setModel(m_annotations);
     m_view->setClassColors(&m_classColors);
 
+    buildActions();
     buildCentralWidget();
     buildMenus();
     updateNavigationActions();
@@ -58,36 +81,126 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_view, &ImageView::shapeDrawn, this, &MainWindow::onShapeDrawn);
     connect(m_view, &ImageView::removeLastRequested, this, &MainWindow::onRemoveLastRequested);
     connect(m_view, &ImageView::annotationsChanged, this, &MainWindow::saveAnnotations);
-    connect(m_view, &ImageView::samPromptsChanged, this, [this] {
-        const int n = m_view->samPoints().size();
-        if (n > 0) {
-            statusBar()->showMessage(tr("%1 prompt point(s). SAM -> Generate Mask (G).").arg(n), 3000);
-        }
-    });
 
     connect(m_sam, &SamBackend::responseReceived, this, &MainWindow::onSamResponse);
     connect(m_sam, &SamBackend::started, this, [this] {
-        statusBar()->showMessage(tr("SAM backend started."), 4000);
-        if (m_pingSamAction) {
-            m_pingSamAction->setEnabled(true);
-        }
+        m_controlBar->setSamStatus(tr("loading model..."), QColor(0xd0, 0x8a, 0x1a));
+        statusBar()->showMessage(tr("SAM backend started; loading model..."), 4000);
+        loadSamModel();  // auto-load the model once the process is up
     });
     connect(m_sam, &SamBackend::stopped, this, [this] {
-        statusBar()->showMessage(tr("SAM backend stopped."), 4000);
-        if (m_pingSamAction) {
-            m_pingSamAction->setEnabled(false);
-        }
+        setSamReady(false);
+        m_controlBar->setSamStatus(tr("stopped"), QColor(0x88, 0x88, 0x88));
     });
     connect(m_sam, &SamBackend::errorOccurred, this, [this](const QString &message) {
-        statusBar()->showMessage(tr("SAM backend: %1").arg(message), 6000);
+        setSamReady(false);
+        m_controlBar->setSamStatus(tr("error"), QColor(0xc0, 0x39, 0x2b));
+        if (!m_samErrorShown) {
+            m_samErrorShown = true;
+            QMessageBox::critical(
+                this, tr("SAM Backend Error"),
+                tr("The SAM backend could not start or crashed:\n\n%1\n\n"
+                   "Fix the issue, then retry with SAM -> Start Backend.").arg(message));
+        }
     });
+
+    // Core functionality: bring the backend up and load the model automatically.
+    m_controlBar->setSamStatus(tr("starting..."), QColor(0xd0, 0x8a, 0x1a));
+    startSamBackend();
 
     statusBar()->showMessage(tr("Ready. Open an image folder to begin."));
 }
 
+void MainWindow::buildActions()
+{
+    // Navigation.
+    m_prevAction = new QAction(tr("Prev"), this);
+    m_prevAction->setShortcut(QKeySequence(Qt::Key_Left));
+    connect(m_prevAction, &QAction::triggered, this, &MainWindow::previousImage);
+
+    m_nextAction = new QAction(tr("Next"), this);
+    m_nextAction->setShortcut(QKeySequence(Qt::Key_Right));
+    connect(m_nextAction, &QAction::triggered, this, &MainWindow::nextImage);
+
+    // Drawing modes (exclusive toggle).
+    auto *modeGroup = new QActionGroup(this);
+    modeGroup->setExclusive(true);
+
+    m_rectModeAction = new QAction(tr("Rectangle"), this);
+    m_rectModeAction->setCheckable(true);
+    m_rectModeAction->setChecked(true);
+    m_rectModeAction->setShortcut(QKeySequence(tr("R")));
+    modeGroup->addAction(m_rectModeAction);
+    connect(m_rectModeAction, &QAction::triggered, this, [this] {
+        m_view->setMode(ImageView::Mode::Rectangle);
+        statusBar()->showMessage(tr("Rectangle mode: click two opposite corners."), 4000);
+    });
+
+    m_polyModeAction = new QAction(tr("Polygon"), this);
+    m_polyModeAction->setCheckable(true);
+    m_polyModeAction->setShortcut(QKeySequence(tr("P")));
+    modeGroup->addAction(m_polyModeAction);
+    connect(m_polyModeAction, &QAction::triggered, this, [this] {
+        m_view->setMode(ImageView::Mode::Polygon);
+        statusBar()->showMessage(
+            tr("Polygon mode: click vertices; click near the first to close."), 4000);
+    });
+
+    // Accept the in-progress / pending shape (also bound to Enter on the canvas).
+    m_acceptAction = new QAction(tr("Accept (Enter)"), this);
+    connect(m_acceptAction, &QAction::triggered, m_view, &ImageView::acceptPendingShape);
+
+    // SAM video tracking (disabled until the model is ready).
+    m_loadMemoryAction = new QAction(tr("Load to Memory"), this);
+    m_loadMemoryAction->setShortcut(QKeySequence(tr("M")));
+    connect(m_loadMemoryAction, &QAction::triggered, this, &MainWindow::loadPolygonToMemory);
+
+    m_predictAction = new QAction(tr("Predict"), this);
+    m_predictAction->setShortcut(QKeySequence(Qt::Key_Space));
+    connect(m_predictAction, &QAction::triggered, this, &MainWindow::predictThisFrame);
+
+    m_resetTrackAction = new QAction(tr("Reset Tracking"), this);
+    connect(m_resetTrackAction, &QAction::triggered, this, &MainWindow::resetTracking);
+
+    // Register every action on the window so its shortcut works even when the
+    // action lives only on the bottom toolbar, not in a menu.
+    for (QAction *a : { m_prevAction, m_nextAction, m_rectModeAction, m_polyModeAction,
+                        m_acceptAction, m_loadMemoryAction, m_predictAction,
+                        m_resetTrackAction }) {
+        addAction(a);
+    }
+
+    setSamReady(false);  // SAM actions off until the model loads
+}
+
+void MainWindow::setSamReady(bool ready)
+{
+    m_samReady = ready;
+    m_loadMemoryAction->setEnabled(ready);
+    m_predictAction->setEnabled(ready);
+    m_resetTrackAction->setEnabled(ready);
+}
+
 void MainWindow::buildCentralWidget()
 {
-    setCentralWidget(m_view);
+    ControlBar::Actions a;
+    a.prev          = m_prevAction;
+    a.next          = m_nextAction;
+    a.rectMode      = m_rectModeAction;
+    a.polyMode      = m_polyModeAction;
+    a.accept        = m_acceptAction;
+    a.loadMemory    = m_loadMemoryAction;
+    a.predict       = m_predictAction;
+    a.resetTracking = m_resetTrackAction;
+    m_controlBar = new ControlBar(a);
+
+    auto *container = new QWidget;
+    auto *layout    = new QVBoxLayout(container);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    layout->addWidget(m_view, /*stretch=*/1);
+    layout->addWidget(m_controlBar);
+    setCentralWidget(container);
 }
 
 void MainWindow::buildMenus()
@@ -105,91 +218,19 @@ void MainWindow::buildMenus()
     exitAction->setShortcut(QKeySequence::Quit);
     connect(exitAction, &QAction::triggered, qApp, &QApplication::quit);
 
-    // --- Image (navigation) --------------------------------------------
-    auto *imageMenu = menuBar()->addMenu(tr("&Image"));
-
-    m_prevAction = imageMenu->addAction(tr("&Previous Image"));
-    m_prevAction->setShortcut(QKeySequence(Qt::Key_Left));
-    connect(m_prevAction, &QAction::triggered, this, &MainWindow::previousImage);
-
-    m_nextAction = imageMenu->addAction(tr("&Next Image"));
-    m_nextAction->setShortcut(QKeySequence(Qt::Key_Right));
-    connect(m_nextAction, &QAction::triggered, this, &MainWindow::nextImage);
-
-    // --- Annotate (drawing mode) ---------------------------------------
-    auto *annotateMenu = menuBar()->addMenu(tr("&Annotate"));
-
-    auto *modeGroup = new QActionGroup(this);
-    modeGroup->setExclusive(true);
-
-    auto *rectAction = annotateMenu->addAction(tr("&Rectangle (box)"));
-    rectAction->setCheckable(true);
-    rectAction->setChecked(true);
-    rectAction->setShortcut(QKeySequence(tr("R")));
-    modeGroup->addAction(rectAction);
-    connect(rectAction, &QAction::triggered, this, [this] {
-        m_view->setMode(ImageView::Mode::Rectangle);
-        statusBar()->showMessage(tr("Rectangle mode: click two opposite corners."), 4000);
-    });
-
-    auto *polyAction = annotateMenu->addAction(tr("&Polygon (segmentation)"));
-    polyAction->setCheckable(true);
-    polyAction->setShortcut(QKeySequence(tr("P")));
-    modeGroup->addAction(polyAction);
-    connect(polyAction, &QAction::triggered, this, [this] {
-        m_view->setMode(ImageView::Mode::Polygon);
-        statusBar()->showMessage(
-            tr("Polygon mode: click vertices; click near the first to close."), 4000);
-    });
-
-    auto *samModeAction = annotateMenu->addAction(tr("&SAM (point prompts)"));
-    samModeAction->setCheckable(true);
-    samModeAction->setShortcut(QKeySequence(tr("S")));
-    modeGroup->addAction(samModeAction);
-    connect(samModeAction, &QAction::triggered, this, [this] {
-        m_view->setMode(ImageView::Mode::Sam);
-        statusBar()->showMessage(
-            tr("SAM mode: left-click = positive point, right-click = negative. "
-               "Then SAM -> Generate Mask."), 6000);
-    });
-
-    // --- SAM (Python backend) ------------------------------------------
+    // --- SAM (model choice only) ---------------------------------------
+    // The backend and model load automatically at startup; tracking controls
+    // live on the bottom ControlBar. The SAM menu just picks WHICH model to use.
     auto *samMenu = menuBar()->addMenu(tr("SA&M"));
-    auto *startSamAction = samMenu->addAction(tr("&Start Backend"));
-    connect(startSamAction, &QAction::triggered, this, &MainWindow::startSamBackend);
-
-    m_pingSamAction = samMenu->addAction(tr("&Ping Backend"));
-    m_pingSamAction->setEnabled(false);  // enabled once the backend starts
-    connect(m_pingSamAction, &QAction::triggered, this, &MainWindow::pingSamBackend);
-
-    auto *loadModelAction = samMenu->addAction(tr("&Load SAM2 Model"));
-    connect(loadModelAction, &QAction::triggered, this, &MainWindow::loadSamModel);
-
-    samMenu->addSeparator();
-
-    auto *generateAction = samMenu->addAction(tr("&Generate Mask"));
-    generateAction->setShortcut(QKeySequence(tr("G")));
-    connect(generateAction, &QAction::triggered, this, &MainWindow::generateMask);
-
-    auto *acceptAction = samMenu->addAction(tr("&Accept Mask"));
-    connect(acceptAction, &QAction::triggered, m_view, &ImageView::acceptPendingShape);
-
-    auto *clearPointsAction = samMenu->addAction(tr("&Clear Points"));
-    clearPointsAction->setShortcut(QKeySequence(tr("C")));
-    connect(clearPointsAction, &QAction::triggered, m_view, &ImageView::clearSamPrompts);
-
-    samMenu->addSeparator();
-
-    auto *seedMemoryAction = samMenu->addAction(tr("Load Polygon to SAM &Memory"));
-    seedMemoryAction->setShortcut(QKeySequence(tr("M")));
-    connect(seedMemoryAction, &QAction::triggered, this, &MainWindow::loadPolygonToMemory);
-
-    auto *predictAction = samMenu->addAction(tr("Predict &This Frame (Space)"));
-    predictAction->setShortcut(QKeySequence(Qt::Key_Space));
-    connect(predictAction, &QAction::triggered, this, &MainWindow::predictThisFrame);
-
-    auto *resetTrackAction = samMenu->addAction(tr("&Reset Tracking"));
-    connect(resetTrackAction, &QAction::triggered, this, &MainWindow::resetTracking);
+    auto *modelGroup = new QActionGroup(this);
+    modelGroup->setExclusive(true);
+    for (int i = 0; i < kSamModelCount; ++i) {
+        auto *modelAction = samMenu->addAction(tr(kSamModels[i].name));
+        modelAction->setCheckable(true);
+        modelAction->setChecked(i == m_modelIndex);
+        modelGroup->addAction(modelAction);
+        connect(modelAction, &QAction::triggered, this, [this, i] { selectModel(i); });
+    }
 
     // --- Settings ------------------------------------------------------
     auto *settingsMenu = menuBar()->addMenu(tr("&Settings"));
@@ -347,25 +388,20 @@ void MainWindow::startSamBackend()
         statusBar()->showMessage(tr("SAM backend already running."), 3000);
         return;
     }
+    m_samErrorShown = false;
+    m_controlBar->setSamStatus(tr("starting..."), QColor(0xd0, 0x8a, 0x1a));
     statusBar()->showMessage(tr("Starting SAM backend..."), 3000);
     m_sam->start();
-}
-
-void MainWindow::pingSamBackend()
-{
-    statusBar()->showMessage(tr("Pinging SAM backend..."), 2000);
-    m_sam->ping();
 }
 
 void MainWindow::loadSamModel()
 {
     if (!m_sam->isRunning()) {
-        statusBar()->showMessage(tr("Start the SAM backend first."), 4000);
-        return;
+        return;  // load is auto-triggered once the backend is up
     }
 
-    // Resolve the submodule + checkpoint relative to the repo root (the .exe
-    // lives in build/bin), with QSettings overrides for non-standard layouts.
+    // Resolve the submodule relative to the repo root (the .exe lives in
+    // build/bin); the checkpoint/config come from the selected model variant.
     QDir repo(QApplication::applicationDirPath());
     repo.cdUp();   // build/bin -> build
     repo.cdUp();   // build     -> repo root
@@ -373,36 +409,41 @@ void MainWindow::loadSamModel()
     QSettings settings;
     const QString sam2Root = settings.value(QStringLiteral("sam2Root"),
         repo.absoluteFilePath(QStringLiteral("third_party/sam2"))).toString();
-    const QString checkpoint = settings.value(QStringLiteral("sam2Checkpoint"),
-        repo.absoluteFilePath(QStringLiteral("models/sam2.1_hiera_tiny.pt"))).toString();
-    const QString config = settings.value(QStringLiteral("sam2Config"),
-        QStringLiteral("configs/sam2.1/sam2.1_hiera_t.yaml")).toString();
     const QString device = settings.value(QStringLiteral("samDevice"),
         QStringLiteral("cpu")).toString();
 
-    statusBar()->showMessage(tr("Loading SAM2 model (this can take a few seconds)..."));
-    m_sam->loadModel(checkpoint, config, sam2Root, device);
+    const SamModel &model = kSamModels[m_modelIndex];
+    const QString checkpoint =
+        repo.absoluteFilePath(QStringLiteral("models/") + QLatin1String(model.checkpoint));
+
+    if (!QFileInfo::exists(checkpoint)) {
+        setSamReady(false);
+        m_controlBar->setSamStatus(tr("error"), QColor(0xc0, 0x39, 0x2b));
+        QMessageBox::warning(
+            this, tr("Model Not Found"),
+            tr("The %1 model checkpoint was not found:\n\n%2\n\n"
+               "Download it into the models/ folder (see models/README.md), "
+               "or pick another model under SAM -> Model.")
+                .arg(QLatin1String(model.name), checkpoint));
+        return;
+    }
+
+    m_controlBar->setSamStatus(tr("loading model..."), QColor(0xd0, 0x8a, 0x1a));
+    statusBar()->showMessage(tr("Loading SAM2 %1 model...").arg(QLatin1String(model.name)));
+    m_sam->loadModel(checkpoint, QLatin1String(model.config), sam2Root, device);
 }
 
-void MainWindow::generateMask()
+void MainWindow::selectModel(int index)
 {
-    if (m_currentIndex < 0) {
-        statusBar()->showMessage(tr("Open an image first."), 4000);
+    if (index < 0 || index >= kSamModelCount) {
         return;
     }
-    if (!m_sam->isRunning()) {
-        statusBar()->showMessage(tr("Start the SAM backend and load the model first."), 5000);
-        return;
+    m_modelIndex = index;
+    QSettings().setValue(QStringLiteral("samModelIndex"), index);
+    if (m_sam->isRunning()) {
+        setSamReady(false);   // disable tracking until the new model is ready
+        loadSamModel();       // reload with the chosen variant
     }
-    const QList<QPointF> points = m_view->samPoints();
-    const QList<int>     labels = m_view->samLabels();
-    if (points.isEmpty()) {
-        statusBar()->showMessage(
-            tr("Switch to SAM mode and place at least one positive point."), 5000);
-        return;
-    }
-    statusBar()->showMessage(tr("Generating mask (%1 point(s))...").arg(points.size()));
-    m_sam->segment(m_imagePaths.at(m_currentIndex), points, labels);
 }
 
 void MainWindow::loadPolygonToMemory()
@@ -472,6 +513,22 @@ void MainWindow::onSamResponse(const QJsonObject &reply)
     const QString status  = reply.value(QStringLiteral("status")).toString();
     const QString message = reply.value(QStringLiteral("message")).toString();
 
+    if (command == QStringLiteral("load_model")) {
+        if (status == QStringLiteral("ok")) {
+            setSamReady(true);
+            m_controlBar->setSamStatus(tr("ready"), QColor(0x2e, 0x8b, 0x57));
+            statusBar()->showMessage(tr("SAM2 model loaded - ready."), 4000);
+        } else {
+            setSamReady(false);
+            m_controlBar->setSamStatus(tr("error"), QColor(0xc0, 0x39, 0x2b));
+            QMessageBox::warning(
+                this, tr("SAM Model Failed to Load"),
+                tr("The SAM2 model could not be loaded:\n\n%1\n\n"
+                   "Check the checkpoint path, then retry with SAM -> Load Model.").arg(message));
+        }
+        return;
+    }
+
     if (command == QStringLiteral("track_seed")) {
         statusBar()->showMessage(
             status == QStringLiteral("ok")
@@ -520,33 +577,8 @@ void MainWindow::onSamResponse(const QJsonObject &reply)
         return;
     }
 
-    if (command == QStringLiteral("segment")) {
-        if (status != QStringLiteral("ok")) {
-            statusBar()->showMessage(tr("SAM segment failed: %1").arg(message), 6000);
-            return;
-        }
-        // Use the largest returned polygon as the preview (first; sorted by area).
-        const QJsonArray polygons = reply.value(QStringLiteral("polygons")).toArray();
-        if (polygons.isEmpty()) {
-            statusBar()->showMessage(tr("SAM returned no polygon; try another point."), 5000);
-            return;
-        }
-        QList<QPointF> poly;
-        for (const QJsonValue &pt : polygons.first().toArray()) {
-            const QJsonArray xy = pt.toArray();
-            if (xy.size() == 2) {
-                poly.append(QPointF(xy[0].toDouble(), xy[1].toDouble()));
-            }
-        }
-        m_view->setSamPreview(poly);
-        statusBar()->showMessage(
-            tr("Mask ready (score %1). Press Enter to accept, or add points and regenerate.")
-                .arg(reply.value(QStringLiteral("score")).toDouble(), 0, 'f', 2), 8000);
-        return;
-    }
-
-    // ping / load_model / others.
-    statusBar()->showMessage(tr("SAM response: %1 (%2)").arg(status, message), 5000);
+    // Any other reply: surface it on the status bar.
+    statusBar()->showMessage(tr("SAM: %1 (%2)").arg(status, message), 5000);
 }
 
 void MainWindow::saveAnnotations() const
@@ -589,6 +621,11 @@ void MainWindow::updateNavigationActions()
     const bool hasImages = !m_imagePaths.isEmpty();
     m_prevAction->setEnabled(m_currentIndex > 0);
     m_nextAction->setEnabled(hasImages && m_currentIndex + 1 < m_imagePaths.size());
+    if (m_controlBar) {
+        m_controlBar->setFrameCounter(
+            hasImages ? tr("%1 / %2").arg(m_currentIndex + 1).arg(m_imagePaths.size())
+                      : tr("- / -"));
+    }
 }
 
 void MainWindow::showAbout()

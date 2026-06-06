@@ -33,15 +33,10 @@ public:
 public slots:
     bool start();          // locate python + sam_service.py and launch (idempotent)
     void stop();           // ask the service to shut down, then ensure it's gone
-    void ping();           // convenience: sendRequest({"command":"ping"})
 
-    // Build the SAM2 predictor once in the resident process.
+    // Build the SAM2 video predictor once in the resident process.
     void loadModel(const QString &checkpoint, const QString &config,
                    const QString &sam2Root, const QString &device);
-
-    // Run SAM2 on an image with point prompts (labels: 1 = positive, 0 = negative).
-    void segment(const QString &imagePath,
-                 const QList<QPointF> &points, const QList<int> &labels);
 
     // Load `polygon` on frame `seedFrame` into SAM2's video memory (a conditioning
     // frame). `frames` is the whole ordered sequence. Memory accumulates across calls.

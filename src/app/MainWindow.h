@@ -8,6 +8,7 @@
 #include <QStringList>
 
 class AnnotationModel;
+class ControlBar;
 class ImageView;
 class SamBackend;
 class QAction;
@@ -33,9 +34,8 @@ private slots:
     void onRemoveLastRequested();            // delete last shape, re-export
     void openSettings();                     // edit per-class colours
     void startSamBackend();
-    void pingSamBackend();
-    void loadSamModel();
-    void generateMask();
+    void loadSamModel();                     // load the currently-selected model variant
+    void selectModel(int index);             // choose which SAM2 model to load
     void loadPolygonToMemory();   // M: register current frame's polygon as memory
     void predictThisFrame();      // Space: predict current frame from memory
     void resetTracking();
@@ -43,8 +43,10 @@ private slots:
     void showAbout();
 
 private:
+    void buildActions();
     void buildCentralWidget();
     void buildMenus();
+    void setSamReady(bool ready);            // enable/disable SAM-dependent actions
     void loadCurrentImage();
     void updateNavigationActions();
     void saveAnnotations() const;            // (re)write the current image's .txt
@@ -55,11 +57,18 @@ private:
     ImageView       *m_view        = nullptr;
     AnnotationModel *m_annotations = nullptr;
     SamBackend      *m_sam         = nullptr;
+    ControlBar      *m_controlBar  = nullptr;
     ClassColors      m_classColors;          // per-class render colours (persisted)
 
-    QAction *m_prevAction = nullptr;
-    QAction *m_nextAction = nullptr;
-    QAction *m_pingSamAction = nullptr;
+    // Shared actions (used by both the menus and the bottom ControlBar).
+    QAction *m_prevAction       = nullptr;
+    QAction *m_nextAction       = nullptr;
+    QAction *m_rectModeAction   = nullptr;
+    QAction *m_polyModeAction   = nullptr;
+    QAction *m_acceptAction     = nullptr;
+    QAction *m_loadMemoryAction = nullptr;
+    QAction *m_predictAction    = nullptr;
+    QAction *m_resetTrackAction = nullptr;
 
     // Folder state.
     QStringList m_imagePaths;
@@ -68,7 +77,10 @@ private:
 
     int m_lastClassId = 0;                   // remembered as the class dialog default
 
-    // Video tracking state.
+    // SAM/tracking state.
+    int  m_modelIndex     = 0;       // selected SAM2 model variant (persisted)
+    bool m_samReady       = false;   // model loaded and ready
+    bool m_samErrorShown  = false;   // guard against repeated error dialogs
     bool m_memorySeeded   = false;   // a polygon has been loaded into SAM memory
     int  m_trackClassId   = 0;       // class to apply to predicted polygons
 };

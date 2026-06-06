@@ -26,6 +26,11 @@ SamBackend::SamBackend(QObject *parent)
 
 SamBackend::~SamBackend()
 {
+    // Sever process->backend signals first: waitForFinished() below pumps the
+    // event loop, and a buffered stdout line would otherwise emit
+    // responseReceived() into an already-destructing owner (MainWindow).
+    m_process->disconnect(this);
+
     if (m_process->state() != QProcess::NotRunning) {
         // Best-effort graceful shutdown, then force-kill if it lingers.
         m_process->write(QByteArrayLiteral("{\"command\":\"shutdown\"}\n"));
@@ -196,11 +201,6 @@ void SamBackend::stop()
     sendRequest(QJsonObject{ { "command", "shutdown" } });
 }
 
-void SamBackend::ping()
-{
-    sendRequest(QJsonObject{ { "command", "ping" } });
-}
-
 void SamBackend::loadModel(const QString &checkpoint, const QString &config,
                            const QString &sam2Root, const QString &device)
 {
@@ -210,25 +210,6 @@ void SamBackend::loadModel(const QString &checkpoint, const QString &config,
         { "config", config },
         { "sam2_root", sam2Root },
         { "device", device },
-    });
-}
-
-void SamBackend::segment(const QString &imagePath,
-                         const QList<QPointF> &points, const QList<int> &labels)
-{
-    QJsonArray jsonPoints;
-    for (const QPointF &p : points) {
-        jsonPoints.append(QJsonArray{ p.x(), p.y() });
-    }
-    QJsonArray jsonLabels;
-    for (int l : labels) {
-        jsonLabels.append(l);
-    }
-    sendRequest(QJsonObject{
-        { "command", "segment" },
-        { "image_path", imagePath },
-        { "points", jsonPoints },
-        { "labels", jsonLabels },
     });
 }
 
