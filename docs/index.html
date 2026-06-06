@@ -9,7 +9,7 @@
 <main>
 
 <h1>AutoLabel</h1>
-<p class="subtitle">A lightweight image annotation tool for building YOLO segmentation datasets with Meta SAM2. Built to feel like a natural extension of <strong>InferenceVisualizer</strong> &mdash; same layout, architecture, and Qt patterns. Current phase: <strong>Phase 3 &mdash; Manual annotation</strong>.</p>
+<p class="subtitle">A lightweight image annotation tool for building YOLO segmentation datasets with Meta SAM2. Built to feel like a natural extension of <strong>InferenceVisualizer</strong> &mdash; same layout, architecture, and Qt patterns. Current phase: <strong>Phase 8 &mdash; Video propagation</strong>.</p>
 
 <nav class="toc">
   <strong>Contents</strong>
@@ -45,7 +45,72 @@
   disagree, AutoLabel follows InferenceVisualizer so the two apps feel like one software family.
 </p>
 
-<h2 id="phase">2. Current phase <span class="badge">Phase 3 / 10</span></h2>
+<h2 id="phase">2. Current phase <span class="badge">Phase 8 &mdash; Video propagation</span></h2>
+<p>This is the workflow the project was really built for (the user's thesis use case: a 360&deg; video of a
+   corroded steel piece, split into frames). It mirrors SegmentAnythingAnnotator's <em>Add Key Frame</em> +
+   <em>Propagate</em>, but on SAM2's built-in <strong>video predictor</strong> &mdash; so no separate
+   <strong>STCN</strong> model (SAA needed STCN only because SAM&nbsp;1 had no video; SAM2's memory replaces it).</p>
+<p><strong>The exact loop:</strong></p>
+<ol>
+  <li>Open the folder of frames.</li>
+  <li>On frame 1, <strong>draw the polygon by hand</strong> and assign a class. (This is the precise seed &mdash;
+      <em>not</em> point prompts; the point-prompt "Generate Mask" tool is a separate, optional convenience.)</li>
+  <li>Press <kbd>M</kbd> &mdash; <em>Load Polygon to SAM Memory</em>: the polygon is rasterised to a mask and added
+      to the video predictor's memory with <code>add_new_mask</code> (a conditioning frame).</li>
+  <li>Go to the next frame, press <kbd>Space</kbd> &mdash; <em>Predict This Frame</em>: SAM2 draws the polygon for
+      that one frame from memory, auto-applied with the seed's class. Good enough &rarr; next frame, <kbd>Space</kbd>
+      again. When it degrades (the angle moved too far), <em>Reset Tracking</em> and go back to step&nbsp;2.</li>
+</ol>
+<p><strong>Per-frame, on demand.</strong> Prediction is one frame at a time, not an upfront whole-sequence pass:
+   the backend keeps the <code>inference_state</code> resident and drives a single <code>propagate_in_video</code>
+   generator <em>stepped one frame per <kbd>Space</kbd></em> (cached so you only pay once per frame). Commands:
+   <code>track_seed</code> (stage frames as numeric JPEGs &rarr; build video predictor lazily &rarr;
+   <code>add_new_mask</code>), <code>track_step</code> (advance the generator to the requested frame &rarr; mask
+   &rarr; contour &rarr; polygon), <code>reset_tracking</code> (drop the state/generator/cache). Verified on a
+   synthetic moving-square clip: seed frame&nbsp;0, then <kbd>Space</kbd> on frames 1&ndash;3 each returned the
+   correctly-shifted polygon, ~2.5&nbsp;s/frame on CPU.</p>
+<p><em>Note: CPU prediction is ~seconds per frame; one object/class per memory; a prediction replaces that frame's
+   annotation (single-object tracking).</em></p>
+<details><summary style="cursor:pointer">Earlier: Phases 6&ndash;7 &mdash; Interactive SAM workflow</summary>
+<p>The SAM2 service is now wired into the canvas as an interactive workflow (mask visualization + the
+   Generate/Accept/Clear cycle, folded together since the service already returns ready-to-draw polygons). A new
+   <strong>SAM canvas mode</strong> turns clicks into prompt points: <strong>left-click = positive</strong> (green),
+   <strong>right-click = negative</strong> (red). <em>SAM &rarr; Generate Mask</em> (G) sends the current image path
+   + points/labels to the backend; the returned polygon is shown as a <strong>translucent filled preview</strong>
+   (the mask visualization). <strong>Enter</strong> (Accept) routes it through the existing pending&rarr;class&rarr;
+   commit&rarr;YOLO path, so a SAM result becomes an ordinary committed polygon &mdash; editable and exported like any
+   other. <em>Clear Points</em> (C) / <strong>Esc</strong> drops the prompts and preview. Adding a point invalidates
+   a stale preview so you can refine and regenerate. The whole loop stays responsive because the backend is async and
+   keeps the image embedding cached between clicks.</p>
+</details>
+<details><summary style="cursor:pointer">Earlier: Phase 5 &mdash; SAM2 backend service</summary>
+<p>Phase 5 makes the resident Python service actually run SAM2. <code>sam_service.py</code> gains two commands
+   (torch/sam2 imported lazily so <code>ping</code> stays dependency-free): <strong><code>load_model</code></strong>
+   adds the vendored submodule to <code>sys.path</code>, builds the predictor via <code>build_sam2</code> +
+   <code>SAM2ImagePredictor</code> <em>once</em>, and keeps it resident; <strong><code>segment</code></strong>
+   takes an image path + positive/negative point prompts, sets the image (caching the embedding so repeated
+   clicks on the same image are cheap), runs <code>predict</code>, picks the best mask, and returns
+   <strong>polygon(s)</strong> via <code>cv2.findContours</code> + <code>approxPolyDP</code> (the mask&rarr;polygon
+   step done backend-side, where cv2 lives). On the C++ side <code>SamBackend::loadModel()</code> and a
+   <em>SAM &rarr; Load SAM2 Model</em> action drive the resident load (paths resolved from the repo, overridable
+   via <code>QSettings</code>). Verified end-to-end through the service: load ~5&nbsp;s once, then a single
+   centre click segments the test square at score 0.99 in ~1.9&nbsp;s on CPU, returning a clean 4-point polygon.
+   Hooking point prompts + a <em>Generate/Accept</em> workflow into the canvas is Phase 6&ndash;7.</p>
+</details>
+<details><summary style="cursor:pointer">Earlier: Phase 4 &mdash; Python backend communication</summary>
+<p>Phase 4 opens the SAM2 half by building the <strong>communication layer</strong> (no model yet). A new
+   <code>backend/SamBackend</code> launches a long-lived Python process (<code>python/sam_service.py</code>) via
+   <code>QProcess</code> and talks to it over <strong>line-delimited JSON</strong> on stdin/stdout &mdash; one
+   request object per line, one response per line. It is fully asynchronous: requests are written and replies
+   arrive via <code>responseReceived()</code>, so the GUI never blocks on (eventually slow) inference. A new
+   <em>SAM</em> menu exposes <em>Start Backend</em> and <em>Ping Backend</em>; <code>ping</code> &rarr;
+   <code>{"status":"ok","message":"pong"}</code> round-trips and shows in the status bar. The Python interpreter is
+   found on <code>PATH</code>; the service script is copied next to the executable by a CMake post-build step.
+   Verified: feeding <code>ping</code>/<code>shutdown</code> lines to the service returns the expected JSON with
+   echoed ids. The environment scan for Phase 5: <code>torch&nbsp;2.12&nbsp;(CPU)</code>, <code>cv2</code>,
+   <code>numpy</code> present; <strong>sam2 not yet installed</strong> (a Phase 5 prerequisite).</p>
+</details>
+<details><summary style="cursor:pointer">Earlier: Phase 3 &mdash; Manual annotation</summary>
 <p><strong>Direction change (decided with the user).</strong> The original brief centred on SAM2 auto-masking
    via positive/negative point prompts. We pivoted: the <strong>manual</strong> annotation tool becomes the
    core (pure C++/Qt, no backend), and SAM2 is layered on later &mdash; eventually able to take a manually
@@ -73,6 +138,7 @@
    no C++ OpenCV installed (only the Python <code>cv2</code> package). OpenCV-shaped work (mask&rarr;polygon
    extraction) will live in the Python SAM2 backend where <code>cv2</code> already exists; the frontend stays
    on Qt for loading and display.</p>
+</details>
 
 <h2 id="tree">3. Folder structure</h2>
 <div class="tree">AutoLabel/
@@ -88,14 +154,23 @@
 &#9474;   &#9474;   &#9500;&#9472;&#9472; ImageView.cpp
 &#9474;   &#9474;   &#9500;&#9472;&#9472; SettingsDialog.h    <span class="cm"># class-id -> colour table (QColorDialog)</span>
 &#9474;   &#9474;   &#9492;&#9472;&#9472; SettingsDialog.cpp
-&#9474;   &#9492;&#9472;&#9472; annotation/             <span class="cm"># Phase 3: annotation data + YOLO I/O</span>
-&#9474;       &#9500;&#9472;&#9472; Shape.h             <span class="cm"># one shape (rectangle or polygon) in image pixels</span>
-&#9474;       &#9500;&#9472;&#9472; AnnotationModel.h   <span class="cm"># list of committed shapes + change signal</span>
-&#9474;       &#9500;&#9472;&#9472; AnnotationModel.cpp
-&#9474;       &#9500;&#9472;&#9472; ClassColors.h       <span class="cm"># class id -> colour (overrides + default palette)</span>
-&#9474;       &#9500;&#9472;&#9472; ClassColors.cpp
-&#9474;       &#9500;&#9472;&#9472; YoloIo.h            <span class="cm"># Shape list &lt;-&gt; YOLO .txt (normalized)</span>
-&#9474;       &#9492;&#9472;&#9472; YoloIo.cpp
+&#9474;   &#9500;&#9472;&#9472; annotation/             <span class="cm"># Phase 3: annotation data + YOLO I/O</span>
+&#9474;   &#9474;   &#9500;&#9472;&#9472; Shape.h             <span class="cm"># one shape (rectangle or polygon) in image pixels</span>
+&#9474;   &#9474;   &#9500;&#9472;&#9472; AnnotationModel.h   <span class="cm"># list of committed shapes + change signal</span>
+&#9474;   &#9474;   &#9500;&#9472;&#9472; AnnotationModel.cpp
+&#9474;   &#9474;   &#9500;&#9472;&#9472; ClassColors.h       <span class="cm"># class id -> colour (overrides + default palette)</span>
+&#9474;   &#9474;   &#9500;&#9472;&#9472; ClassColors.cpp
+&#9474;   &#9474;   &#9500;&#9472;&#9472; YoloIo.h            <span class="cm"># Shape list &lt;-&gt; YOLO .txt (normalized)</span>
+&#9474;   &#9474;   &#9492;&#9472;&#9472; YoloIo.cpp
+&#9474;   &#9492;&#9472;&#9472; backend/                <span class="cm"># Phase 4: bridge to the Python SAM service</span>
+&#9474;       &#9500;&#9472;&#9472; SamBackend.h        <span class="cm"># QProcess + line-delimited JSON client (async)</span>
+&#9474;       &#9492;&#9472;&#9472; SamBackend.cpp
+&#9500;&#9472;&#9472; python/
+&#9474;   &#9500;&#9472;&#9472; sam_service.py          <span class="cm"># long-lived JSON service (Phase 4: ping; Phase 5: SAM2)</span>
+&#9474;   &#9492;&#9472;&#9472; requirements.txt        <span class="cm"># SAM2 runtime deps (hydra-core, iopath, pillow)</span>
+&#9500;&#9472;&#9472; third_party/
+&#9474;   &#9492;&#9472;&#9472; sam2/                   <span class="cm"># git submodule: SAM2 source + config YAMLs (pinned)</span>
+&#9500;&#9472;&#9472; models/                     <span class="cm"># SAM2 .pt checkpoints (gitignored; README tracked)</span>
 &#9500;&#9472;&#9472; docs/
 &#9474;   &#9500;&#9472;&#9472; index.html              <span class="cm"># this project doc</span>
 &#9474;   &#9492;&#9472;&#9472; style.css               <span class="cm"># shared stylesheet (same as InferenceVisualizer)</span>
@@ -194,6 +269,71 @@
       in their class colour.</li>
 </ul>
 
+<h3>Phase 4 (Python backend communication)</h3>
+<ul>
+  <li>New <code>python/sam_service.py</code>: a long-lived service reading line-delimited JSON from stdin and
+      writing one JSON response per line to stdout (diagnostics go to stderr). Phase 4 implements only the
+      transport + <code>ping</code>/<code>shutdown</code>; it echoes an optional request <code>id</code> and never
+      lets one bad request kill the loop.</li>
+  <li>New <code>backend/SamBackend</code> (C++): owns a <code>QProcess</code> running the service, locates the
+      Python interpreter on <code>PATH</code> (<code>QStandardPaths::findExecutable</code>), launches the script
+      with <code>-u</code> (unbuffered), and parses stdout into whole JSON lines (buffering partial reads). Fully
+      asynchronous &mdash; <code>sendRequest()</code> writes, <code>responseReceived()</code> delivers replies;
+      the destructor asks the service to shut down and force-kills if it lingers.</li>
+  <li><code>MainWindow</code> gained a <em>SAM</em> menu (<em>Start Backend</em>, <em>Ping Backend</em>) and shows
+      backend state / responses in the status bar. A CMake post-build step copies <code>sam_service.py</code>
+      next to the executable.</li>
+</ul>
+
+<h3>Phase 5 (SAM2 backend service)</h3>
+<ul>
+  <li><code>sam_service.py</code> gained <code>load_model</code> and <code>segment</code> (torch/sam2 imported
+      lazily, so <code>ping</code> still needs no ML stack). <code>load_model</code> prepends the submodule to
+      <code>sys.path</code>, runs <code>build_sam2</code> + <code>SAM2ImagePredictor</code> once, and keeps the
+      predictor resident in a module global.</li>
+  <li><code>segment</code> takes <code>image_path</code> + <code>points</code>/<code>labels</code>, caches the
+      image embedding (re-sets only when the path changes), runs <code>predict(multimask_output=True)</code>,
+      takes the best-scoring mask, and converts it to polygon(s) with <code>cv2.findContours</code> +
+      <code>approxPolyDP</code>; returns the polygons in image-pixel coordinates plus score and size. Responses
+      now echo the originating <code>command</code> so the C++ side can route them.</li>
+  <li><code>SamBackend::loadModel()</code> + a <em>SAM &rarr; Load SAM2 Model</em> action build the resident model
+      through the real channel; the submodule and checkpoint paths are resolved from the repo root (the
+      <code>.exe</code> is in <code>build/bin</code>) and overridable via <code>QSettings</code>
+      (<code>sam2Root</code>, <code>sam2Checkpoint</code>, <code>sam2Config</code>, <code>samDevice</code>).</li>
+</ul>
+
+<h3>Phases 6&ndash;7 (interactive SAM workflow)</h3>
+<ul>
+  <li>New <code>ImageView</code> mode <code>Sam</code>: left-click adds a positive prompt point (green),
+      right-click a negative one (red), drawn with a white outline. Prompts are kept in image-pixel coordinates and
+      exposed via <code>samPoints()</code>/<code>samLabels()</code>; adding one clears any stale preview.</li>
+  <li><code>SamBackend::segment(imagePath, points, labels)</code> sends a <code>segment</code> request;
+      <code>MainWindow::generateMask()</code> (<em>SAM &rarr; Generate Mask</em>, G) gathers the current image's
+      prompts and fires it. <code>onSamResponse()</code> now routes by the echoed <code>command</code>: a
+      <code>segment</code> reply's first polygon becomes the canvas preview.</li>
+  <li>Mask visualization: the pending polygon is filled translucently (so a SAM result reads like a mask), with the
+      outline + vertices on top. <strong>Accept</strong> (Enter) reuses the Phase 3 pending&rarr;<code>shapeDrawn</code>
+      path &mdash; the SAM polygon becomes a committed shape with a class and is written to the YOLO <code>.txt</code>,
+      identical to a hand-drawn one. <em>Clear Points</em> (C) / Esc drop prompts + preview.</li>
+</ul>
+
+<h3>Phase 8 (video tracking, SAA-style per-frame)</h3>
+<ul>
+  <li>Backend commands on a resident video <code>inference_state</code>: <code>track_seed</code> stages the frames
+      as numeric JPEGs (SAM2's video API only accepts mp4 or a <code>&lt;index&gt;.jpg</code> folder; cached),
+      lazily builds <code>build_sam2_video_predictor</code> (reusing the loaded model), and adds the hand-drawn
+      polygon as a mask (<code>add_new_mask</code>) &mdash; a memory/conditioning frame.
+      <code>track_step</code> predicts <strong>one</strong> frame on demand by stepping a single
+      <code>propagate_in_video</code> generator (cached per frame), returning that frame's polygon.
+      <code>reset_tracking</code> drops state/generator/cache.</li>
+  <li><code>SamBackend::seedMemory()</code> / <code>predictFrame()</code> / <code>resetTracking()</code> drive a
+      <em>SAM</em> menu: <em>Load Polygon to SAM Memory</em> (<kbd>M</kbd>), <em>Predict This Frame</em>
+      (<kbd>Space</kbd>), <em>Reset Tracking</em>. The seed is the last committed shape (rectangles &rarr; 4
+      corners); its class is applied to predictions. A prediction replaces the target frame's annotation and is
+      saved to YOLO (single-object tracking). Opening a new folder resets memory.</li>
+  <li>STCN is not needed &mdash; SAM2's built-in video memory does what SAA used STCN for.</li>
+</ul>
+
 <h2 id="why">5. Why it was implemented this way</h2>
 
 <h3>5.5 QGraphicsView for the image canvas, not a scaled QLabel</h3>
@@ -283,6 +423,47 @@ case Qt::Key_Enter:
    still distinct. Overrides persist via <code>QSettings</code> (org/app already set in <code>main.cpp</code>),
    exactly like IV persists its inference settings.</p>
 
+<h3>5.13 Line-delimited JSON over QProcess, async by design</h3>
+<p>The C++ frontend and the Python model live in separate processes (different language, different runtime), so
+   they talk over <code>QProcess</code> stdin/stdout. The framing is the simplest thing that works:
+   <strong>one JSON object per line</strong>. No length prefixes, no binary framing &mdash; a newline terminates a
+   message, and partial reads are buffered until one arrives. stdout is reserved strictly for JSON responses;
+   all Python diagnostics go to stderr (which C++ mirrors into its log), so a stray <code>print</code> can't
+   corrupt the channel. The transport is asynchronous from day one because SAM2 inference will take seconds:
+   <code>SamBackend</code> writes a request and returns immediately; the reply arrives later via a signal, so the
+   GUI thread never blocks. This is the same "controller as facade" idea as IV's <code>VideoController</code>
+   &mdash; the app sees signals/slots, never the underlying <code>QProcess</code>.</p>
+<pre><code><span class="c">// src/backend/SamBackend.cpp &mdash; buffer stdout, emit one object per line</span>
+void SamBackend::onReadyReadStandardOutput()
+{
+    m_stdoutBuffer += m_process-&gt;readAllStandardOutput();
+    int newline;
+    while ((newline = m_stdoutBuffer.indexOf('\n')) &gt;= 0) {
+        const QByteArray line = m_stdoutBuffer.left(newline);
+        m_stdoutBuffer.remove(0, newline + 1);
+        // ... parse JSON, emit responseReceived(obj) ...
+    }
+}</code></pre>
+<p><em>Deployment note:</em> the service script is copied next to the <code>.exe</code> by a CMake
+   <em>post-build</em> step, which only runs when the target relinks &mdash; so after editing
+   <code>sam_service.py</code> alone, rebuild (or re-copy) to refresh the deployed copy.</p>
+
+<h3>5.14 Backend returns polygons, not raw masks; model + embedding stay resident</h3>
+<p>Two choices keep the SAM2 service fast and a clean fit for the existing app. First, <code>segment</code>
+   returns <strong>polygons</strong> (contours), not a pixel mask: a mask is hundreds of KB of JSON per call and
+   would still need contouring somewhere &mdash; doing it backend-side (where <code>cv2</code> already lives)
+   means the reply is a few dozen points that drop straight into the same <code>Shape</code>/<code>AnnotationModel</code>
+   the manual tool uses. Second, the predictor is built <em>once</em> in the resident process and the per-image
+   <strong>embedding is cached</strong> &mdash; <code>set_image</code> (the expensive part) runs only when the
+   image path changes, so the 2nd..Nth click on the same image is just the cheap decoder pass. This is exactly
+   why the process is long-lived rather than spawned per request.</p>
+<pre><code><span class="c"># python/sam_service.py &mdash; set_image only when the image actually changes</span>
+if image_path != _image_path:
+    rgb = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB)
+    _predictor.set_image(rgb)        <span class="c"># expensive image embedding -- cached</span>
+    _image_path = image_path
+masks, scores, _ = _predictor.predict(point_coords=..., point_labels=..., multimask_output=True)</code></pre>
+
 <h3>5.1 Mirror InferenceVisualizer's two-tier CMake and <code>src/</code> layout</h3>
 <p>The root <code>CMakeLists.txt</code> answers <em>"what is this project, and where is Qt?"</em>; the
    inner <code>src/CMakeLists.txt</code> answers <em>"what files compile into the binary?"</em>. Adopting
@@ -341,15 +522,84 @@ C:\Projects\AutoLabel\build\bin\AutoLabel.exe</code></pre>
   <li><strong>Phase 2 &mdash; Image viewer.</strong> Open folder, display/navigate images (Qt <code>QImageReader</code> &rarr; <code>QGraphicsView</code>). <em>(Zoom/pan since removed in Phase 3.)</em></li>
   <li><strong>Phase 3 &mdash; Manual annotation.</strong> <em>(current)</em> Rectangle (2-click box) + Polygon (multi-click, close near first) drawing, shape model, abort/undo/delete, class entry on Enter, YOLO <code>.txt</code> export + load next to each image.</li>
   <li><strong>Phase 3-edit &mdash; Vertex editing + class colours.</strong> <em>(done)</em> Long-press a vertex to drag it; long-press an edge to add a vertex; right-click to delete vertex/shape; per-class colours via a Settings dialog.</li>
-  <li><strong>Phase 4 &mdash; Python backend comms.</strong> Long-lived <code>QProcess</code>, JSON request/response (<code>ping</code> &rarr; <code>ok</code>).</li>
-  <li><strong>Phase 5 &mdash; SAM2 service.</strong> Load model once; image + points in, mask out.</li>
-  <li><strong>Phase 6 &mdash; Mask visualization.</strong> Overlay with adjustable transparency, auto-refresh.</li>
-  <li><strong>Phase 7 &mdash; SAM2-assisted workflow.</strong> Positive/negative prompt points; Generate / Accept / Clear; accepted mask &rarr; polygon (OpenCV contour extraction in the Python backend). Later: seed SAM2 from a manual shape and auto-predict on the next images.</li>
+  <li><strong>Phase 4 &mdash; Python backend comms.</strong> <em>(current)</em> Long-lived <code>QProcess</code>, line-delimited JSON request/response (<code>ping</code> &rarr; <code>ok</code>).</li>
+  <li><strong>Phase 5 &mdash; SAM2 service.</strong> <em>(current)</em> Load model once (resident); image path + points in, polygon out (verified on CPU).</li>
+  <li><strong>Phase 6 &mdash; Mask visualization.</strong> <em>(done)</em> Translucent filled preview of the returned polygon, refreshed on each Generate.</li>
+  <li><strong>Phase 7 &mdash; SAM2-assisted workflow.</strong> <em>(done)</em> Positive/negative prompt points; Generate / Accept / Clear; accepted mask &rarr; committed polygon &rarr; YOLO.</li>
+  <li><strong>Phase 8 &mdash; Video tracking.</strong> <em>(done)</em> Hand-draw a polygon, <kbd>M</kbd> to load it into SAM2 memory, then <kbd>Space</kbd> per frame to predict the object on each (SAM2 video predictor, no STCN). When it degrades, Reset Tracking and re-seed. Per-frame on demand, ~seconds/frame on CPU.</li>
 </ol>
 <p class="subtitle">Roadmap reordered after the Phase 3 direction change: the manual tool (originally Phases 3, 8&ndash;10) is now the core and largely lands in Phase 3; SAM2 (originally Phases 4&ndash;7) is layered on afterward.</p>
 
 <h2 id="changelog">8. Changelog</h2>
 <ul>
+  <li><strong>2026-06-04 &mdash; Phase 8 (video tracking, SAA-style per-frame).</strong> The thesis workflow, rebuilt
+      to match exactly: draw a polygon by hand &rarr; <kbd>M</kbd> loads it into SAM2 memory &rarr; <kbd>Space</kbd>
+      predicts one frame at a time on demand &rarr; reset + re-seed when it degrades. The seed is a hand-drawn polygon
+      loaded as a mask (<strong>not</strong> point prompts &mdash; that earlier confusion was a misuse of the separate
+      Generate-Mask tool). Backend reworked from a one-shot <code>propagate</code> into <code>track_seed</code>
+      (stage numeric-JPEG frames cached &rarr; lazily build <code>build_sam2_video_predictor</code> &rarr;
+      <code>add_new_mask</code>), <code>track_step</code> (advance a single resident <code>propagate_in_video</code>
+      generator one frame per call, cached) and <code>reset_tracking</code>. C++ <code>SamBackend::seedMemory()</code>
+      / <code>predictFrame()</code> / <code>resetTracking()</code> + <em>SAM</em> menu <em>Load Polygon to SAM Memory</em>
+      (<kbd>M</kbd>) / <em>Predict This Frame</em> (<kbd>Space</kbd>) / <em>Reset Tracking</em>; predictions take the
+      seed's class and replace the frame's annotation, saved to YOLO. STCN is unnecessary (SAM2's video memory replaces
+      it). Verified on a synthetic moving-square clip: seed frame 0, then <kbd>Space</kbd> on frames 1&ndash;3 returned
+      the correctly-shifted polygon, ~2.5&nbsp;s/frame on CPU; reset clears memory. Limits: ~seconds/frame on CPU;
+      one object/class per memory; prediction replaces the frame's annotation.</li>
+  <li><strong>2026-06-04 &mdash; Phases 6&ndash;7 (interactive SAM workflow).</strong> New <code>ImageView</code>
+      <code>Sam</code> mode: left/right click = positive/negative prompt points (green/red), kept in image-pixel
+      coords. <code>SamBackend::segment()</code> + <em>SAM &rarr; Generate Mask</em> (G) send the prompts;
+      <code>onSamResponse()</code> routes the echoed <code>command</code> and turns the returned polygon into a
+      translucent filled <strong>preview</strong> (mask visualization). <strong>Accept</strong> (Enter) reuses the
+      Phase 3 pending&rarr;class&rarr;commit&rarr;YOLO path, so a SAM polygon becomes a normal committed shape;
+      <em>Clear Points</em> (C)/Esc reset. Adding a point invalidates a stale preview for easy refine-and-regenerate.
+      Async throughout + cached embedding keeps the UI responsive. Builds clean; the underlying segment path was
+      verified end-to-end in Phase 5.</li>
+  <li><strong>2026-06-04 &mdash; Phase 5 (SAM2 backend service).</strong> <code>sam_service.py</code> gained
+      <code>load_model</code> (lazy-imports torch/sam2, adds the submodule to <code>sys.path</code>, builds
+      <code>build_sam2</code> + <code>SAM2ImagePredictor</code> once, keeps it resident) and <code>segment</code>
+      (image path + point prompts &rarr; <code>set_image</code> with embedding caching &rarr; <code>predict</code>
+      &rarr; best mask &rarr; <code>cv2.findContours</code> + <code>approxPolyDP</code> &rarr; polygon(s) in pixel
+      coords + score). Responses echo the originating <code>command</code> for routing. C++ gained
+      <code>SamBackend::loadModel()</code> and a <em>SAM &rarr; Load SAM2 Model</em> action; submodule/checkpoint
+      paths resolve from the repo root and are <code>QSettings</code>-overridable. Verified end-to-end through the
+      service: resident load ~5&nbsp;s, then a single centre click on the 640&times;480 test image returned a
+      4-point polygon with bbox (160,120)-(479,359) &mdash; exactly the white square &mdash; score 0.99 in
+      ~1.9&nbsp;s on CPU. UI point-prompting + Generate/Accept is Phase 6&ndash;7.</li>
+  <li><strong>2026-06-04 &mdash; SAM2 environment setup (pre-Phase 5).</strong> Vendored SAM2 as a git submodule
+      at <code>third_party/sam2</code> (pinned), chosen over a PyPI/pip-from-git install for reproducibility and to
+      avoid building SAM2's optional CUDA extension &mdash; the service imports <code>sam2</code> via
+      <code>sys.path</code> instead. Added <code>python/requirements.txt</code> (hydra-core, iopath, pillow; torch
+      assumed present) and a tracked <code>models/</code> folder (weights gitignored) with a README pointing at the
+      checkpoint download. <strong>Verified the whole stack on Python 3.14 / CPU</strong>: deps install cleanly;
+      <code>import sam2</code> + <code>build_sam2</code> + <code>SAM2ImagePredictor</code> import; Hydra resolves the
+      tiny config and the model assembles; and a real end-to-end run (tiny checkpoint, positive click on a test
+      image) returns an accurate mask (score 0.99, ~0.8s load + ~2.2s predict on CPU) which
+      <code>cv2.findContours</code> cleanly turns into a polygon. SAM2 is ready for Phase 5.</li>
+  <li><strong>2026-06-04 &mdash; Phase 4 interpreter-detection hardening.</strong> Real-world launch on Windows
+      exposed three traps that all looked like "backend stopped instantly": (1) the Microsoft Store
+      <code>python.exe</code> alias stub (prints "Python was not found" and exits); (2) the python.org install-manager
+      <code>bin\python.exe</code> shim failing to bootstrap from a GUI; and decisively (3) <strong>GDB's embedded
+      Python sets <code>PYTHONHOME</code></strong>, which the debugged app inherited and passed to every spawned
+      <code>python.exe</code> &mdash; so they all failed with "Failed to import encodings module". Fixes in
+      <code>SamBackend</code>: <code>locatePython()</code> now scans PATH <em>and</em> known real-interpreter
+      locations (PyManager <code>pythoncore-*</code>, python.org installs) and <strong>probes each candidate</strong>
+      (runs <code>import encodings</code>) to pick the first that genuinely works; child processes launch with a
+      <strong>sanitized environment</strong> that strips <code>PYTHONHOME</code>/<code>PYTHONPATH</code>; and an
+      <code>AUTOLABEL_PYTHON</code> override is honoured. Ping now succeeds whether run normally or under the debugger.</li>
+  <li><strong>2026-06-04 &mdash; Phase 4 (Python backend communication).</strong> Built the SAM2 communication
+      layer (no model yet). New <code>python/sam_service.py</code>: a long-lived line-delimited-JSON service over
+      stdin/stdout (one object per line; stdout = responses only, stderr = diagnostics), implementing
+      <code>ping</code> and <code>shutdown</code>, echoing an optional request <code>id</code>, and tolerating a
+      stray leading BOM. New <code>backend/SamBackend</code> (C++): owns a <code>QProcess</code>, finds Python via
+      <code>QStandardPaths::findExecutable</code>, launches the script with <code>-u</code>, buffers stdout into
+      whole JSON lines, and is fully asynchronous (<code>sendRequest</code> &rarr; <code>responseReceived</code>);
+      graceful shutdown + force-kill in the destructor. <code>MainWindow</code> gained a <em>SAM</em> menu
+      (<em>Start Backend</em> / <em>Ping Backend</em>) with status-bar feedback. CMake copies
+      <code>sam_service.py</code> next to the <code>.exe</code> (post-build). Verified the protocol by feeding
+      <code>ping</code>/<code>shutdown</code> to the service &mdash; correct JSON with echoed ids. Environment scan
+      for Phase 5: <code>torch 2.12 (CPU)</code>, <code>cv2 4.13</code>, <code>numpy 2.4</code> present; Python
+      3.14; <strong>sam2 not yet installed</strong>.</li>
   <li><strong>2026-06-04 &mdash; Phase 3 (editing + class colours).</strong> Committed shapes are now editable.
       Mode-agnostic, gesture-based: <strong>long-press a vertex</strong> drags it; <strong>long-press an edge</strong>
       inserts a vertex and drags it (a single-shot <code>QTimer</code> drives the hold; movement before it fires

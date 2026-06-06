@@ -3,6 +3,7 @@
 #include "annotation/Shape.h"
 
 #include <QGraphicsView>
+#include <QList>
 #include <QPointF>
 #include <QVector>
 
@@ -39,7 +40,7 @@ class ImageView : public QGraphicsView
     Q_OBJECT
 
 public:
-    enum class Mode { Rectangle, Polygon };
+    enum class Mode { Rectangle, Polygon, Sam };
 
     explicit ImageView(QWidget *parent = nullptr);
 
@@ -52,10 +53,20 @@ public:
     void setMode(Mode mode);
     Mode mode() const { return m_mode; }
 
+    // SAM prompts in image-pixel coords; labels 1 = positive, 0 = negative.
+    QList<QPointF> samPoints() const { return m_samPoints; }
+    QList<int>     samLabels() const { return m_samLabels; }
+
+public slots:
+    void clearSamPrompts();                            // drop prompt points + preview
+    void setSamPreview(const QList<QPointF> &polygon); // show the mask SAM returned
+    void acceptPendingShape();                         // commit the pending/preview shape
+
 signals:
     void shapeDrawn(const ::Shape &shape);  // new shape completed; needs a class
     void removeLastRequested();             // Delete with nothing in progress
     void annotationsChanged();              // a committed shape was edited/removed
+    void samPromptsChanged();               // prompt points added/cleared
 
 protected:
     void mousePressEvent(QMouseEvent *event) override;
@@ -99,6 +110,11 @@ private:
     QPointF          m_cursor;
     bool             m_pending = false;
     ::Shape          m_pendingShape;
+
+    // SAM prompt state (image-pixel coords). Prompts feed a `segment` request;
+    // the returned polygon is shown as the pending shape (preview).
+    QList<QPointF>   m_samPoints;
+    QList<int>       m_samLabels;
 
     // Editing-committed-shape state.
     QTimer  *m_longPress = nullptr;

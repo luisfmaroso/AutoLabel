@@ -89,3 +89,10 @@ autolabel.log
 
 # Local scratch test data
 test-images/
+
+# SAM2 model checkpoints -- large (~150 MB+), downloaded separately, never committed.
+# Keep the folder + its README tracked, ignore the weights themselves.
+models/*
+!models/README.md
+*.pt
+*.pth

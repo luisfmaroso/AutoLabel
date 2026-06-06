@@ -2,6 +2,7 @@
 
 #include "annotation/AnnotationModel.h"
 #include "annotation/YoloIo.h"
+#include "backend/SamBackend.h"
 #include "ui/ImageView.h"
 #include "ui/SettingsDialog.h"
 
@@ -17,7 +18,11 @@
 #include <QKeySequence>
 #include <QMenu>
 #include <QMenuBar>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QMessageBox>
+#include <QRectF>
 #include <QSettings>
 #include <QStatusBar>
 
@@ -35,6 +40,7 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_view(new ImageView)
     , m_annotations(new AnnotationModel(this))
+    , m_sam(new SamBackend(this))
 {
     setWindowTitle(tr("AutoLabel"));
     resize(1200, 720);
@@ -52,6 +58,29 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_view, &ImageView::shapeDrawn, this, &MainWindow::onShapeDrawn);
     connect(m_view, &ImageView::removeLastRequested, this, &MainWindow::onRemoveLastRequested);
     connect(m_view, &ImageView::annotationsChanged, this, &MainWindow::saveAnnotations);
+    connect(m_view, &ImageView::samPromptsChanged, this, [this] {
+        const int n = m_view->samPoints().size();
+        if (n > 0) {
+            statusBar()->showMessage(tr("%1 prompt point(s). SAM -> Generate Mask (G).").arg(n), 3000);
+        }
+    });
+
+    connect(m_sam, &SamBackend::responseReceived, this, &MainWindow::onSamResponse);
+    connect(m_sam, &SamBackend::started, this, [this] {
+        statusBar()->showMessage(tr("SAM backend started."), 4000);
+        if (m_pingSamAction) {
+            m_pingSamAction->setEnabled(true);
+        }
+    });
+    connect(m_sam, &SamBackend::stopped, this, [this] {
+        statusBar()->showMessage(tr("SAM backend stopped."), 4000);
+        if (m_pingSamAction) {
+            m_pingSamAction->setEnabled(false);
+        }
+    });
+    connect(m_sam, &SamBackend::errorOccurred, this, [this](const QString &message) {
+        statusBar()->showMessage(tr("SAM backend: %1").arg(message), 6000);
+    });
 
     statusBar()->showMessage(tr("Ready. Open an image folder to begin."));
 }
@@ -113,6 +142,55 @@ void MainWindow::buildMenus()
             tr("Polygon mode: click vertices; click near the first to close."), 4000);
     });
 
+    auto *samModeAction = annotateMenu->addAction(tr("&SAM (point prompts)"));
+    samModeAction->setCheckable(true);
+    samModeAction->setShortcut(QKeySequence(tr("S")));
+    modeGroup->addAction(samModeAction);
+    connect(samModeAction, &QAction::triggered, this, [this] {
+        m_view->setMode(ImageView::Mode::Sam);
+        statusBar()->showMessage(
+            tr("SAM mode: left-click = positive point, right-click = negative. "
+               "Then SAM -> Generate Mask."), 6000);
+    });
+
+    // --- SAM (Python backend) ------------------------------------------
+    auto *samMenu = menuBar()->addMenu(tr("SA&M"));
+    auto *startSamAction = samMenu->addAction(tr("&Start Backend"));
+    connect(startSamAction, &QAction::triggered, this, &MainWindow::startSamBackend);
+
+    m_pingSamAction = samMenu->addAction(tr("&Ping Backend"));
+    m_pingSamAction->setEnabled(false);  // enabled once the backend starts
+    connect(m_pingSamAction, &QAction::triggered, this, &MainWindow::pingSamBackend);
+
+    auto *loadModelAction = samMenu->addAction(tr("&Load SAM2 Model"));
+    connect(loadModelAction, &QAction::triggered, this, &MainWindow::loadSamModel);
+
+    samMenu->addSeparator();
+
+    auto *generateAction = samMenu->addAction(tr("&Generate Mask"));
+    generateAction->setShortcut(QKeySequence(tr("G")));
+    connect(generateAction, &QAction::triggered, this, &MainWindow::generateMask);
+
+    auto *acceptAction = samMenu->addAction(tr("&Accept Mask"));
+    connect(acceptAction, &QAction::triggered, m_view, &ImageView::acceptPendingShape);
+
+    auto *clearPointsAction = samMenu->addAction(tr("&Clear Points"));
+    clearPointsAction->setShortcut(QKeySequence(tr("C")));
+    connect(clearPointsAction, &QAction::triggered, m_view, &ImageView::clearSamPrompts);
+
+    samMenu->addSeparator();
+
+    auto *seedMemoryAction = samMenu->addAction(tr("Load Polygon to SAM &Memory"));
+    seedMemoryAction->setShortcut(QKeySequence(tr("M")));
+    connect(seedMemoryAction, &QAction::triggered, this, &MainWindow::loadPolygonToMemory);
+
+    auto *predictAction = samMenu->addAction(tr("Predict &This Frame (Space)"));
+    predictAction->setShortcut(QKeySequence(Qt::Key_Space));
+    connect(predictAction, &QAction::triggered, this, &MainWindow::predictThisFrame);
+
+    auto *resetTrackAction = samMenu->addAction(tr("&Reset Tracking"));
+    connect(resetTrackAction, &QAction::triggered, this, &MainWindow::resetTracking);
+
     // --- Settings ------------------------------------------------------
     auto *settingsMenu = menuBar()->addMenu(tr("&Settings"));
     auto *colorsAction = settingsMenu->addAction(tr("&Class Colours..."));
@@ -160,6 +238,13 @@ void MainWindow::openImageFolder()
 
     m_imagePaths   = paths;
     m_currentIndex = 0;
+
+    // A new sequence starts fresh tracking.
+    m_memorySeeded = false;
+    if (m_sam->isRunning()) {
+        m_sam->resetTracking();
+    }
+
     loadCurrentImage();
     statusBar()->showMessage(
         tr("Opened %1 (%2 image(s)).").arg(QDir(dir).dirName()).arg(paths.size()), 5000);
@@ -256,6 +341,214 @@ void MainWindow::openSettings()
     statusBar()->showMessage(tr("Class colours updated."), 3000);
 }
 
+void MainWindow::startSamBackend()
+{
+    if (m_sam->isRunning()) {
+        statusBar()->showMessage(tr("SAM backend already running."), 3000);
+        return;
+    }
+    statusBar()->showMessage(tr("Starting SAM backend..."), 3000);
+    m_sam->start();
+}
+
+void MainWindow::pingSamBackend()
+{
+    statusBar()->showMessage(tr("Pinging SAM backend..."), 2000);
+    m_sam->ping();
+}
+
+void MainWindow::loadSamModel()
+{
+    if (!m_sam->isRunning()) {
+        statusBar()->showMessage(tr("Start the SAM backend first."), 4000);
+        return;
+    }
+
+    // Resolve the submodule + checkpoint relative to the repo root (the .exe
+    // lives in build/bin), with QSettings overrides for non-standard layouts.
+    QDir repo(QApplication::applicationDirPath());
+    repo.cdUp();   // build/bin -> build
+    repo.cdUp();   // build     -> repo root
+
+    QSettings settings;
+    const QString sam2Root = settings.value(QStringLiteral("sam2Root"),
+        repo.absoluteFilePath(QStringLiteral("third_party/sam2"))).toString();
+    const QString checkpoint = settings.value(QStringLiteral("sam2Checkpoint"),
+        repo.absoluteFilePath(QStringLiteral("models/sam2.1_hiera_tiny.pt"))).toString();
+    const QString config = settings.value(QStringLiteral("sam2Config"),
+        QStringLiteral("configs/sam2.1/sam2.1_hiera_t.yaml")).toString();
+    const QString device = settings.value(QStringLiteral("samDevice"),
+        QStringLiteral("cpu")).toString();
+
+    statusBar()->showMessage(tr("Loading SAM2 model (this can take a few seconds)..."));
+    m_sam->loadModel(checkpoint, config, sam2Root, device);
+}
+
+void MainWindow::generateMask()
+{
+    if (m_currentIndex < 0) {
+        statusBar()->showMessage(tr("Open an image first."), 4000);
+        return;
+    }
+    if (!m_sam->isRunning()) {
+        statusBar()->showMessage(tr("Start the SAM backend and load the model first."), 5000);
+        return;
+    }
+    const QList<QPointF> points = m_view->samPoints();
+    const QList<int>     labels = m_view->samLabels();
+    if (points.isEmpty()) {
+        statusBar()->showMessage(
+            tr("Switch to SAM mode and place at least one positive point."), 5000);
+        return;
+    }
+    statusBar()->showMessage(tr("Generating mask (%1 point(s))...").arg(points.size()));
+    m_sam->segment(m_imagePaths.at(m_currentIndex), points, labels);
+}
+
+void MainWindow::loadPolygonToMemory()
+{
+    if (!m_sam->isRunning()) {
+        statusBar()->showMessage(tr("Start the SAM backend and load the model first."), 5000);
+        return;
+    }
+    if (m_currentIndex < 0 || m_imagePaths.size() < 2) {
+        statusBar()->showMessage(tr("Open a folder of frames first."), 5000);
+        return;
+    }
+    if (m_annotations->isEmpty()) {
+        statusBar()->showMessage(
+            tr("Draw the object's polygon on this frame first, then load it to memory (M)."), 6000);
+        return;
+    }
+
+    // Use the last committed shape as the object; its class is applied to predictions.
+    const Shape seed = m_annotations->shapes().last();
+    QList<QPointF> polygon;
+    if (seed.type == Shape::Type::Rectangle && seed.points.size() == 2) {
+        const QRectF r = QRectF(seed.points[0], seed.points[1]).normalized();
+        polygon = { r.topLeft(), r.topRight(), r.bottomRight(), r.bottomLeft() };
+    } else {
+        polygon = QList<QPointF>(seed.points.begin(), seed.points.end());
+    }
+    if (polygon.size() < 3) {
+        statusBar()->showMessage(tr("Seed shape is too small."), 5000);
+        return;
+    }
+
+    m_trackClassId  = seed.classId >= 0 ? seed.classId : m_lastClassId;
+    m_memorySeeded  = true;
+    m_sam->seedMemory(m_imagePaths, m_currentIndex, polygon);
+    statusBar()->showMessage(
+        tr("Loading polygon to SAM memory... then go to the next frame and press Space."), 5000);
+}
+
+void MainWindow::predictThisFrame()
+{
+    if (!m_sam->isRunning()) {
+        statusBar()->showMessage(tr("Start the SAM backend and load the model first."), 5000);
+        return;
+    }
+    if (!m_memorySeeded) {
+        statusBar()->showMessage(
+            tr("Load a polygon to SAM memory first (draw it, then press M)."), 6000);
+        return;
+    }
+    statusBar()->showMessage(tr("Predicting frame %1...").arg(m_currentIndex + 1));
+    m_sam->predictFrame(m_currentIndex);
+}
+
+void MainWindow::resetTracking()
+{
+    m_memorySeeded = false;
+    if (m_sam->isRunning()) {
+        m_sam->resetTracking();
+    }
+    statusBar()->showMessage(tr("SAM memory cleared. Draw a new polygon and press M."), 4000);
+}
+
+void MainWindow::onSamResponse(const QJsonObject &reply)
+{
+    const QString command = reply.value(QStringLiteral("command")).toString();
+    const QString status  = reply.value(QStringLiteral("status")).toString();
+    const QString message = reply.value(QStringLiteral("message")).toString();
+
+    if (command == QStringLiteral("track_seed")) {
+        statusBar()->showMessage(
+            status == QStringLiteral("ok")
+                ? tr("Polygon loaded to SAM memory. Go to the next frame and press Space.")
+                : tr("Could not load to memory: %1").arg(message), 6000);
+        return;
+    }
+
+    if (command == QStringLiteral("track_step")) {
+        if (status != QStringLiteral("ok")) {
+            statusBar()->showMessage(tr("Predict failed: %1").arg(message), 6000);
+            return;
+        }
+        const int frame = reply.value(QStringLiteral("frame")).toInt();
+        const QSize size(reply.value(QStringLiteral("width")).toInt(),
+                         reply.value(QStringLiteral("height")).toInt());
+
+        Shape s;
+        s.type = Shape::Type::Polygon;
+        s.classId = m_trackClassId;
+        for (const QJsonValue &pt : reply.value(QStringLiteral("polygon")).toArray()) {
+            const QJsonArray xy = pt.toArray();
+            if (xy.size() == 2) {
+                s.points.append(QPointF(xy[0].toDouble(), xy[1].toDouble()));
+            }
+        }
+
+        if (!s.isComplete()) {
+            statusBar()->showMessage(
+                tr("SAM lost the object on this frame - correct it by hand, or Reset Tracking "
+                   "and re-seed (M)."), 7000);
+            return;
+        }
+
+        // Apply the predicted polygon to the frame it belongs to (single-object
+        // tracking: it replaces that frame's annotation).
+        if (frame == m_currentIndex) {
+            m_annotations->setShapes(QVector<Shape>{ s });
+            saveAnnotations();
+        } else if (frame >= 0 && frame < m_imagePaths.size()) {
+            YoloIo::writeFile(labelPathForIndex(frame), QVector<Shape>{ s }, size);
+        }
+        statusBar()->showMessage(
+            tr("Predicted frame %1. If it's good, go to the next frame and press Space; "
+               "if not, fix it or Reset Tracking.").arg(frame + 1), 6000);
+        return;
+    }
+
+    if (command == QStringLiteral("segment")) {
+        if (status != QStringLiteral("ok")) {
+            statusBar()->showMessage(tr("SAM segment failed: %1").arg(message), 6000);
+            return;
+        }
+        // Use the largest returned polygon as the preview (first; sorted by area).
+        const QJsonArray polygons = reply.value(QStringLiteral("polygons")).toArray();
+        if (polygons.isEmpty()) {
+            statusBar()->showMessage(tr("SAM returned no polygon; try another point."), 5000);
+            return;
+        }
+        QList<QPointF> poly;
+        for (const QJsonValue &pt : polygons.first().toArray()) {
+            const QJsonArray xy = pt.toArray();
+            if (xy.size() == 2) {
+                poly.append(QPointF(xy[0].toDouble(), xy[1].toDouble()));
+            }
+        }
+        m_view->setSamPreview(poly);
+        statusBar()->showMessage(
+            tr("Mask ready (score %1). Press Enter to accept, or add points and regenerate.")
+                .arg(reply.value(QStringLiteral("score")).toDouble(), 0, 'f', 2), 8000);
+        return;
+    }
+
+    // ping / load_model / others.
+    statusBar()->showMessage(tr("SAM response: %1 (%2)").arg(status, message), 5000);
+}
+
 void MainWindow::saveAnnotations() const
 {
     if (m_currentIndex < 0 || m_currentImageSize.isEmpty()) {
@@ -266,7 +559,12 @@ void MainWindow::saveAnnotations() const
 
 QString MainWindow::labelPathForCurrentImage() const
 {
-    const QFileInfo info(m_imagePaths.at(m_currentIndex));
+    return labelPathForIndex(m_currentIndex);
+}
+
+QString MainWindow::labelPathForIndex(int index) const
+{
+    const QFileInfo info(m_imagePaths.at(index));
     return info.absolutePath() + QLatin1Char('/') + info.completeBaseName() + QStringLiteral(".txt");
 }
 
