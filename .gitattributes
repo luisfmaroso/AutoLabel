@@ -1,2 +1,15 @@
-*.cmake linguist-generated=true
-CMakeLists.txt linguist-generated=true
+# Build system -- not application code.
+*.cmake         linguist-generated=true
+CMakeLists.txt  linguist-generated=true
+
+# Docs + media (HTML/CSS/images) don't represent the project's code.
+docs/**         linguist-documentation
+
+# Markdown is prose, not code.
+*.md            linguist-documentation
+
+# A dependency list, not a Python program.
+python/requirements.txt linguist-documentation
+
+# Editor config (JSON) -- not application code.
+.vscode/**      linguist-vendored
